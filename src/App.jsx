@@ -180,19 +180,26 @@ function CourseProgressBar({ pct }) {
    3. beforeunload shows browser popup when timer is active.
    4. onTick called once per second for daily study tracking.
 ═══════════════════════════════════════════════════════════════ */
-function Stopwatch({ onTick }) {
+function Stopwatch({ onTick, onAdjust }) {
   const timerInit              = useMemo(initTimer, []);
   const [elapsed, setElapsed]  = useState(timerInit.elapsed);
   const [running, setRunning]  = useState(timerInit.running);
+
+  const [isEditing, setIsEditing] = useState(false);
+  const [editH, setEditH] = useState(0);
+  const [editM, setEditM] = useState(0);
+  const [editS, setEditS] = useState(0);
 
   const elapsedRef  = useRef(timerInit.elapsed);
   const runningRef  = useRef(timerInit.running);
   const startTsRef  = useRef(timerInit.startTs);  // anchor: Date.now() – elapsed*1000
   const onTickRef   = useRef(onTick);
+  const onAdjustRef = useRef(onAdjust);
 
   useEffect(() => { elapsedRef.current = elapsed; }, [elapsed]);
   useEffect(() => { runningRef.current = running; }, [running]);
   useEffect(() => { onTickRef.current  = onTick;  }, [onTick]);
+  useEffect(() => { onAdjustRef.current = onAdjust; }, [onAdjust]);
 
   // persistTimer: ONLY anchor when running, ONLY elapsed when paused, plus lastSavedTs
   const persistTimer = useCallback((el, run) => {
@@ -282,6 +289,96 @@ function Stopwatch({ onTick }) {
     set(ref(db, 'users/rahul/stats/timer'), resetData).catch(err => console.error(err));
   };
 
+  const startEdit = () => {
+    const h = Math.floor(elapsedRef.current / 3600);
+    const m = Math.floor((elapsedRef.current % 3600) / 60);
+    const s = elapsedRef.current % 60;
+    setEditH(h);
+    setEditM(m);
+    setEditS(s);
+    setIsEditing(true);
+  };
+
+  const saveEdit = () => {
+    const newElapsed = Math.max(0, editH * 3600 + editM * 60 + editS);
+    const delta = newElapsed - elapsedRef.current;
+    
+    elapsedRef.current = newElapsed;
+    setElapsed(newElapsed);
+    
+    if (runningRef.current) {
+      startTsRef.current = Date.now() - newElapsed * 1000;
+    }
+    
+    persistTimer(newElapsed, runningRef.current);
+    onAdjustRef.current?.(delta);
+    setIsEditing(false);
+  };
+
+  if (isEditing) {
+    return (
+      <div className="rounded-xl border border-slate-700/60 bg-slate-800/40 p-5 flex flex-col gap-4">
+        <div className="flex items-center gap-2 text-slate-400">
+          <Timer size={15} />
+          <span className="text-xs font-semibold uppercase tracking-widest">Adjust Session Timer</span>
+        </div>
+
+        <div className="flex justify-center items-center gap-2 py-2">
+          <div className="flex flex-col items-center">
+            <input
+              type="number"
+              min="0"
+              max="23"
+              value={editH}
+              onChange={e => setEditH(Math.max(0, parseInt(e.target.value) || 0))}
+              className="w-14 bg-slate-900 border border-slate-700 text-slate-200 text-center font-mono text-xl py-1 rounded focus:outline-none focus:border-indigo-500"
+            />
+            <span className="text-[10px] text-slate-500 mt-1 uppercase font-semibold">hr</span>
+          </div>
+          <span className="text-xl text-slate-600 font-mono">:</span>
+          <div className="flex flex-col items-center">
+            <input
+              type="number"
+              min="0"
+              max="59"
+              value={editM}
+              onChange={e => setEditM(Math.min(59, Math.max(0, parseInt(e.target.value) || 0)))}
+              className="w-14 bg-slate-900 border border-slate-700 text-slate-200 text-center font-mono text-xl py-1 rounded focus:outline-none focus:border-indigo-500"
+            />
+            <span className="text-[10px] text-slate-500 mt-1 uppercase font-semibold">min</span>
+          </div>
+          <span className="text-xl text-slate-600 font-mono">:</span>
+          <div className="flex flex-col items-center">
+            <input
+              type="number"
+              min="0"
+              max="59"
+              value={editS}
+              onChange={e => setEditS(Math.min(59, Math.max(0, parseInt(e.target.value) || 0)))}
+              className="w-14 bg-slate-900 border border-slate-700 text-slate-200 text-center font-mono text-xl py-1 rounded focus:outline-none focus:border-indigo-500"
+            />
+            <span className="text-[10px] text-slate-500 mt-1 uppercase font-semibold">sec</span>
+          </div>
+        </div>
+
+        <div className="flex gap-2 justify-center">
+          <button
+            onClick={saveEdit}
+            className="px-4 py-1.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-lg text-xs font-semibold hover:bg-indigo-500/30 transition-all duration-200"
+          >
+            Save
+          </button>
+          <button
+            onClick={() => setIsEditing(false)}
+            className="px-4 py-1.5 bg-slate-750/30 text-slate-400 border border-slate-700/40 rounded-lg text-xs font-semibold hover:bg-slate-700/40 transition-all duration-200"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="rounded-xl border border-slate-700/60 bg-slate-800/40 p-5 flex flex-col gap-4">
       <div className="flex items-center gap-2 text-slate-400">
@@ -327,6 +424,15 @@ function Stopwatch({ onTick }) {
           className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-slate-400 border border-slate-700/60 hover:bg-slate-700/40 hover:text-slate-200 transition-all duration-200"
         >
           <RotateCcw size={15} /> Reset
+        </button>
+      </div>
+
+      <div className="text-center mt-0.5">
+        <button
+          onClick={startEdit}
+          className="text-[10px] text-slate-600 hover:text-slate-400 transition-colors uppercase tracking-wider font-bold"
+        >
+          Adjust Time
         </button>
       </div>
     </div>
@@ -965,6 +1071,22 @@ export default function App() {
     setDailyStudy(next);            // schedule re-render
   }, []);
 
+  const handleTimerAdjust = useCallback((delta) => {
+    if (!dailyStudyRef.current) return;
+    const today = todayISO();
+    const next  = {
+      ...dailyStudyRef.current,
+      [today]: Math.max(0, (dailyStudyRef.current[today] ?? 0) + delta),
+    };
+    dailyStudyRef.current = next;   // immediate ref update
+    ss(K.DAILY_STUDY, next);        // persist
+
+    // Sync to Firebase
+    set(ref(db, 'users/rahul/stats/dailyStudy'), next).catch(err => console.error(err));
+
+    setDailyStudy(next);            // schedule re-render
+  }, []);
+
   // ── Lecture toggle ────────────────────────────────────────────
   // Compute both next states from refs, then call both setters with values (no nesting)
   const toggleLecture = useCallback((id) => {
@@ -1070,7 +1192,7 @@ export default function App() {
 
           {/* Right: timer + daily goal */}
           <div className="lg:col-span-1 flex flex-col gap-3">
-            <Stopwatch onTick={handleTimerTick} />
+            <Stopwatch onTick={handleTimerTick} onAdjust={handleTimerAdjust} />
             <DailyGoalCard todayCourseMins={todayCourseMins} streak={streak} />
           </div>
         </div>
