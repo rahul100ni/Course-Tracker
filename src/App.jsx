@@ -5,7 +5,7 @@ import {
   Circle, CheckSquare, Target, Flame, BarChart3, Calendar,
 } from 'lucide-react';
 import { COURSE_DATA } from './courseData';
-import { ref, set } from 'firebase/database';
+import { ref, set, get } from 'firebase/database';
 import { db } from './firebase';
 
 /* ═══════════════════════════════════════════════════════════════
@@ -109,13 +109,13 @@ function initTimer() {
 
 /* ═══════════════════════════════════════════════════════════════
    DAILY STUDY INIT
-   Adds away-seconds to today when the timer was running on restore.
+   Adds away-seconds (based on lastSavedTs) to today when restore happens.
 ═══════════════════════════════════════════════════════════════ */
 function initDailyStudy() {
   const ds    = { ...ls(K.DAILY_STUDY, {}) };
   const saved = ls(K.TIMER, {});
-  if (saved.sessionStartTs) {
-    const awaySeconds = Math.max(0, Math.floor((Date.now() - saved.sessionStartTs) / 1000));
+  if (saved.sessionStartTs && saved.lastSavedTs) {
+    const awaySeconds = Math.max(0, Math.floor((Date.now() - saved.lastSavedTs) / 1000));
     if (awaySeconds > 0) {
       const today     = todayISO();
       ds[today]       = (ds[today] ?? 0) + awaySeconds;
@@ -194,14 +194,13 @@ function Stopwatch({ onTick }) {
   useEffect(() => { runningRef.current = running; }, [running]);
   useEffect(() => { onTickRef.current  = onTick;  }, [onTick]);
 
-  // persistTimer: ONLY anchor when running, ONLY elapsed when paused
+  // persistTimer: ONLY anchor when running, ONLY elapsed when paused, plus lastSavedTs
   const persistTimer = useCallback((el, run) => {
-    if (run) {
-      // Anchor = "time when elapsed would have been 0"
-      ss(K.TIMER, { sessionStartTs: startTsRef.current });
-    } else {
-      ss(K.TIMER, { sessionElapsed: el, sessionStartTs: null });
-    }
+    const timerData = run
+      ? { sessionStartTs: startTsRef.current, lastSavedTs: Date.now() }
+      : { sessionElapsed: el, sessionStartTs: null, lastSavedTs: Date.now() };
+    ss(K.TIMER, timerData);
+    set(ref(db, 'users/rahul/stats/timer'), timerData).catch(err => console.error('Timer sync failed:', err));
   }, []);
 
   // Tick every second — all side effects outside state updaters
@@ -257,7 +256,9 @@ function Stopwatch({ onTick }) {
     elapsedRef.current  = 0;
     runningRef.current  = false;
     startTsRef.current  = null;
-    ss(K.TIMER, { sessionElapsed: 0, sessionStartTs: null });
+    const resetData = { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null };
+    ss(K.TIMER, resetData);
+    set(ref(db, 'users/rahul/stats/timer'), resetData).catch(err => console.error(err));
   };
 
   return (
@@ -635,9 +636,10 @@ function StudyHistory({ mergedHistory }) {
 ═══════════════════════════════════════════════════════════════ */
 export default function App() {
   // ── Persistent state ─────────────────────────────────────────
-  const [completedIds, setCompletedIds] = useState(() => new Set(ls(K.COMPLETED, [])));
-  const [lectureDates, setLectureDates] = useState(() => ls(K.LECTURE_DATES, {}));
-  const [dailyStudy,   setDailyStudy]   = useState(initDailyStudy);
+  const [firebaseLoaded, setFirebaseLoaded] = useState(false);
+  const [completedIds, setCompletedIds] = useState(() => new Set());
+  const [lectureDates, setLectureDates] = useState({});
+  const [dailyStudy,   setDailyStudy]   = useState({});
 
   // Refs: latest values for use in callbacks without stale closures
   const completedIdsRef = useRef(completedIds);
@@ -711,8 +713,92 @@ export default function App() {
     return s;
   }, [courseHistoryByDay, todayCourseMins]);
 
+  // ── Fetch Initial Stats from Firebase ─────────────────────────
+  useEffect(() => {
+    const statsRef = ref(db, 'users/rahul/stats');
+    get(statsRef)
+      .then((snapshot) => {
+        const isBackupImported = localStorage.getItem('cst_backup_imported') === 'true';
+
+        if (snapshot.exists() && !isBackupImported) {
+          const stats = snapshot.val();
+          const savedCompleted = stats.completed || [];
+          const savedLectureDates = stats.lectureDates || {};
+          const savedDailyStudy = stats.dailyStudy || {};
+          const savedTimer = stats.timer || { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null };
+
+          let calculatedDailyStudy = { ...savedDailyStudy };
+          let calculatedTimer = { ...savedTimer };
+          if (savedTimer.sessionStartTs && savedTimer.lastSavedTs) {
+            const awaySeconds = Math.max(0, Math.floor((Date.now() - savedTimer.lastSavedTs) / 1000));
+            if (awaySeconds > 0) {
+              const today = todayISO();
+              calculatedDailyStudy[today] = (calculatedDailyStudy[today] ?? 0) + awaySeconds;
+              calculatedTimer.lastSavedTs = Date.now();
+            }
+          }
+
+          // Update localStorage cache
+          ss(K.COMPLETED, savedCompleted);
+          ss(K.LECTURE_DATES, savedLectureDates);
+          ss(K.DAILY_STUDY, calculatedDailyStudy);
+          ss(K.TIMER, calculatedTimer);
+
+          // Update Firebase with recalculated daily study/timer
+          set(ref(db, 'users/rahul/stats/dailyStudy'), calculatedDailyStudy).catch(err => console.error(err));
+          set(ref(db, 'users/rahul/stats/timer'), calculatedTimer).catch(err => console.error(err));
+
+          setCompletedIds(new Set(savedCompleted));
+          setLectureDates(savedLectureDates);
+          setDailyStudy(calculatedDailyStudy);
+        } else {
+          // Database is empty OR backup was just imported.
+          const initialCompleted = isBackupImported ? ls(K.COMPLETED, []) : [];
+          const initialLectureDates = isBackupImported ? ls(K.LECTURE_DATES, {}) : {};
+          const initialDailyStudy = isBackupImported ? ls(K.DAILY_STUDY, {}) : {};
+          const initialTimer = isBackupImported ? ls(K.TIMER, { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null }) : { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null };
+
+          if (isBackupImported) {
+            localStorage.removeItem('cst_backup_imported');
+          }
+
+          const initialStats = {
+            completed: initialCompleted,
+            lectureDates: initialLectureDates,
+            dailyStudy: initialDailyStudy,
+            timer: initialTimer
+          };
+
+          // Save to Firebase
+          set(statsRef, initialStats)
+            .then(() => {
+              ss(K.COMPLETED, initialCompleted);
+              ss(K.LECTURE_DATES, initialLectureDates);
+              ss(K.DAILY_STUDY, initialDailyStudy);
+              ss(K.TIMER, initialTimer);
+
+              setCompletedIds(new Set(initialCompleted));
+              setLectureDates(initialLectureDates);
+              setDailyStudy(initialDailyStudy);
+            })
+            .catch(err => console.error('Failed to initialize stats in Firebase:', err));
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to fetch stats from Firebase:', err);
+        // Fallback to localStorage on error
+        setCompletedIds(new Set(ls(K.COMPLETED, [])));
+        setLectureDates(ls(K.LECTURE_DATES, {}));
+        setDailyStudy(initDailyStudy());
+      })
+      .finally(() => {
+        setFirebaseLoaded(true);
+      });
+  }, []);
+
   // ── Sync Live Stats to Firebase ──────────────────────────────
   useEffect(() => {
+    if (!firebaseLoaded) return;
     const today = todayISO();
     const completedLecturesToday = COURSE_DATA
       .filter(l => completedIds.has(l.id) && lectureDates[l.id] === today)
@@ -724,12 +810,13 @@ export default function App() {
       completedLecturesToday,
       updatedAt: new Date().toISOString()
     }).catch(err => console.error('Firebase sync failed:', err));
-  }, [dailyStudy, todayCourseMins, completedIds, lectureDates]);
+  }, [dailyStudy, todayCourseMins, completedIds, lectureDates, firebaseLoaded]);
 
   // ── Timer tick: update daily study seconds ────────────────────
   // Uses ref-based pattern: read ref → compute next → update ref + storage + state
   // (Never calls setState inside another setState updater)
   const handleTimerTick = useCallback(() => {
+    if (!dailyStudyRef.current) return;
     const today = todayISO();
     const next  = {
       ...dailyStudyRef.current,
@@ -737,6 +824,10 @@ export default function App() {
     };
     dailyStudyRef.current = next;   // immediate ref update
     ss(K.DAILY_STUDY, next);        // persist
+
+    // Sync to Firebase
+    set(ref(db, 'users/rahul/stats/dailyStudy'), next).catch(err => console.error(err));
+
     setDailyStudy(next);            // schedule re-render
   }, []);
 
@@ -757,14 +848,29 @@ export default function App() {
       nextDates[id] = today;
     }
 
-    ss(K.COMPLETED, [...nextIds]);
+    const arrayIds = [...nextIds];
+    ss(K.COMPLETED, arrayIds);
     ss(K.LECTURE_DATES, nextDates);
+
+    // Sync to Firebase
+    set(ref(db, 'users/rahul/stats/completed'), arrayIds).catch(err => console.error(err));
+    set(ref(db, 'users/rahul/stats/lectureDates'), nextDates).catch(err => console.error(err));
 
     setCompletedIds(nextIds);
     setLectureDates(nextDates);
   }, []);
 
   /* ── Render ─────────────────────────────────────────────────── */
+  if (!firebaseLoaded) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-400">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-sm font-medium tracking-wide">Syncing study progress...</p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
 
@@ -913,6 +1019,7 @@ export default function App() {
                         if (data.lectureDates) ss(K.LECTURE_DATES, data.lectureDates);
                         if (data.dailyStudy)   ss(K.DAILY_STUDY,   data.dailyStudy);
                         if (data.timer)        ss(K.TIMER,         data.timer);
+                        localStorage.setItem('cst_backup_imported', 'true');
                         window.location.reload();
                       } catch { alert('Invalid backup file.'); }
                     };
