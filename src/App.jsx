@@ -524,11 +524,79 @@ function StudyHistory({ mergedHistory }) {
     [mergedHistory]
   );
 
-  const totalContent  = useMemo(() => days.reduce((s, [, r]) => s + (r.courseMinutesWatched ?? 0), 0), [days]);
-  const totalStudied  = useMemo(() => days.reduce((s, [, r]) => s + (r.studiedSeconds ?? 0), 0), [days]);
-  const goalsMet      = useMemo(() => days.filter(([, r]) => (r.courseMinutesWatched ?? 0) >= DAILY_GOAL_MINS).length, [days]);
+  const statsSummary = useMemo(() => {
+    const entries = Object.entries(mergedHistory);
+    if (entries.length === 0) return null;
 
-  if (days.length === 0) return null;
+    let totalSecs = 0;
+    let totalMins = 0;
+    let goalsMetCount = 0;
+    let maxMins = 0;
+    let maxMinsDate = '';
+
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+    const oneWeekAgoStr = `${oneWeekAgo.getFullYear()}-${String(oneWeekAgo.getMonth() + 1).padStart(2, '0')}-${String(oneWeekAgo.getDate()).padStart(2, '0')}`;
+    
+    let weeklySecs = 0;
+    let weeklyMins = 0;
+
+    entries.forEach(([date, data]) => {
+      const mins = data.courseMinutesWatched || 0;
+      const secs = data.studiedSeconds || 0;
+      totalSecs += secs;
+      totalMins += mins;
+      if (mins >= DAILY_GOAL_MINS) {
+        goalsMetCount++;
+      }
+      if (mins > maxMins) {
+        maxMins = mins;
+        maxMinsDate = date;
+      }
+      if (date >= oneWeekAgoStr) {
+        weeklySecs += secs;
+        weeklyMins += mins;
+      }
+    });
+
+    const successRate = entries.length > 0 ? (goalsMetCount / entries.length) * 100 : 0;
+
+    return {
+      totalSecs,
+      totalMins,
+      goalsMetCount,
+      successRate,
+      maxMins,
+      maxMinsDate,
+      weeklySecs,
+      weeklyMins,
+      activeDays: entries.length
+    };
+  }, [mergedHistory]);
+
+  if (days.length === 0) {
+    return (
+      <section id="study-history" className="rounded-xl border border-slate-800 bg-slate-900/20 p-6 text-center">
+        <BarChart3 size={28} className="text-slate-600 mx-auto mb-2" />
+        <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-widest text-slate-400">Study History</h3>
+        <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
+          No study history recorded yet. Start the timer or complete a lecture to see your daily stats here!
+        </p>
+      </section>
+    );
+  }
+
+  const summary = statsSummary || {
+    totalSecs: 0,
+    totalMins: 0,
+    goalsMetCount: 0,
+    successRate: 0,
+    maxMins: 0,
+    maxMinsDate: '',
+    weeklySecs: 0,
+    weeklyMins: 0,
+    activeDays: 0
+  };
 
   return (
     <section id="study-history">
@@ -538,7 +606,7 @@ function StudyHistory({ mergedHistory }) {
         <div className="flex-1 h-px bg-slate-800 ml-2" />
         <div className="flex items-center gap-3 mr-2">
           <span className="text-xs text-slate-500 font-mono hidden sm:block">
-            {fmtMins(totalContent)} content · {fmtSecs(totalStudied)} timer · {goalsMet}/{days.length} goals
+            {fmtMins(summary.totalMins)} content · {fmtSecs(summary.totalSecs)} timer · {summary.goalsMetCount}/{days.length} goals
           </span>
           <Calendar size={13} className="text-slate-600" />
           <span className="text-xs text-slate-600 font-mono">{days.length}d</span>
@@ -550,102 +618,140 @@ function StudyHistory({ mergedHistory }) {
       </button>
 
       {expanded && (
-        <div className="space-y-2">
-          {days.map(([date, rec]) => {
-            const mins          = rec.courseMinutesWatched ?? 0;
-            const studiedSecs   = rec.studiedSeconds ?? 0;
-            const met           = mins >= DAILY_GOAL_MINS;
-            const goalPct       = Math.min((mins / DAILY_GOAL_MINS) * 100, 100);
-            const isToday       = date === todayISO();
-
-            return (
-              <div
-                key={date}
-                className={`rounded-xl border p-4 transition-colors ${
-                  isToday
-                    ? 'border-indigo-500/30 bg-indigo-500/5'
-                    : met
-                    ? 'border-emerald-500/20 bg-emerald-500/5'
-                    : 'border-slate-700/40 bg-slate-800/20'
-                }`}
-              >
-                <div className="flex items-start gap-3 sm:gap-4">
-                  {/* Date */}
-                  <div className="flex-shrink-0 w-24 sm:w-28">
-                    <p className={`text-sm font-bold ${isToday ? 'text-indigo-300' : 'text-slate-200'}`}>
-                      {dateLabel(date)}
-                    </p>
-                    <p className="text-xs text-slate-500 mt-0.5 leading-snug">{fullDateLabel(date)}</p>
-                  </div>
-
-                  {/* Stats grid — 4 cols */}
-                  <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {/* Session timer */}
-                    <div>
-                      <p className={`text-sm font-bold font-mono ${studiedSecs > 0 ? 'text-sky-300' : 'text-slate-600'}`}>
-                        {studiedSecs > 0 ? fmtSecs(studiedSecs) : '—'}
-                      </p>
-                      <p className="text-xs text-slate-500">timer</p>
-                    </div>
-                    {/* Content watched */}
-                    <div>
-                      <p className={`text-sm font-bold font-mono ${met ? 'text-emerald-300' : mins > 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                        {mins > 0 ? fmtMins(mins) : '—'}
-                      </p>
-                      <p className="text-xs text-slate-500">content</p>
-                    </div>
-                    {/* Lectures */}
-                    <div>
-                      <p className={`text-sm font-bold font-mono ${(rec.lecturesCompleted ?? 0) > 0 ? 'text-violet-300' : 'text-slate-600'}`}>
-                        {rec.lecturesCompleted ?? 0}
-                      </p>
-                      <p className="text-xs text-slate-500">lectures</p>
-                    </div>
-                    {/* Cumulative % */}
-                    <div>
-                      <p className="text-sm font-bold font-mono text-indigo-300">
-                        {(rec.completionPct ?? 0).toFixed(1)}%
-                      </p>
-                      <p className="text-xs text-slate-500">cumul.</p>
-                    </div>
-                  </div>
-
-                  {/* Goal badge */}
-                  <div className="flex-shrink-0 text-center">
-                    <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center mx-auto ${
-                        met ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700/40 text-slate-600'
-                      }`}
-                    >
-                      {met ? <CheckCircle2 size={16} /> : <Circle size={16} />}
-                    </div>
-                    <p className={`text-xs mt-0.5 font-medium ${met ? 'text-emerald-500' : 'text-slate-600'}`}>
-                      {met ? 'Met' : 'Missed'}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Goal bar */}
-                <div className="mt-3">
-                  <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                    <div
-                      className="h-full rounded-full"
-                      style={{
-                        width: `${goalPct}%`,
-                        background: met
-                          ? 'linear-gradient(90deg,#10b981,#34d399)'
-                          : 'linear-gradient(90deg,#6366f1,#a78bfa)',
-                      }}
-                    />
-                  </div>
-                  <div className="flex justify-between mt-0.5">
-                    <span className="text-xs text-slate-700 font-mono">0m content</span>
-                    <span className="text-xs text-slate-700 font-mono">240m goal</span>
-                  </div>
-                </div>
+        <div className="space-y-4">
+          {/* Dashboard-style Summary Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 flex flex-col justify-between">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Goal Success Rate</span>
+              <div className="flex items-baseline gap-1.5 mt-2">
+                <span className="text-lg font-bold font-mono text-emerald-400">{summary.successRate.toFixed(0)}%</span>
+                <span className="text-[10px] text-slate-500">{summary.goalsMetCount} / {summary.activeDays} days</span>
               </div>
-            );
-          })}
+            </div>
+
+            <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 flex flex-col justify-between">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Last 7 Days</span>
+              <div className="flex flex-col mt-2">
+                <span className="text-sm font-bold font-mono text-indigo-300">{fmtSecs(summary.weeklySecs)} timer</span>
+                <span className="text-[10px] text-slate-400 mt-0.5">{fmtMins(summary.weeklyMins)} content</span>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 flex flex-col justify-between">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">All-Time Focus</span>
+              <div className="flex items-baseline gap-1 mt-2">
+                <span className="text-lg font-bold font-mono text-sky-400">{Math.round(summary.totalSecs / 3600)} hrs</span>
+                <span className="text-[10px] text-slate-500">total studied</span>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 flex flex-col justify-between">
+              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Personal Best</span>
+              <div className="flex flex-col mt-2">
+                <span className="text-sm font-bold font-mono text-amber-400">{summary.maxMins > 0 ? fmtMins(summary.maxMins) : '—'}</span>
+                <span className="text-[10px] text-slate-500 mt-0.5 truncate">{summary.maxMinsDate ? dateLabel(summary.maxMinsDate) : ''}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Daily Records List */}
+          <div className="space-y-2">
+            {days.map(([date, rec]) => {
+              const mins          = rec.courseMinutesWatched ?? 0;
+              const studiedSecs   = rec.studiedSeconds ?? 0;
+              const met           = mins >= DAILY_GOAL_MINS;
+              const goalPct       = Math.min((mins / DAILY_GOAL_MINS) * 100, 100);
+              const isToday       = date === todayISO();
+
+              return (
+                <div
+                  key={date}
+                  className={`rounded-xl border p-4 transition-colors ${
+                    isToday
+                      ? 'border-indigo-500/30 bg-indigo-500/5'
+                      : met
+                      ? 'border-emerald-500/20 bg-emerald-500/5'
+                      : 'border-slate-700/40 bg-slate-800/20'
+                  }`}
+                >
+                  <div className="flex items-start gap-3 sm:gap-4">
+                    {/* Date */}
+                    <div className="flex-shrink-0 w-24 sm:w-28">
+                      <p className={`text-sm font-bold ${isToday ? 'text-indigo-300' : 'text-slate-200'}`}>
+                        {dateLabel(date)}
+                      </p>
+                      <p className="text-xs text-slate-500 mt-0.5 leading-snug">{fullDateLabel(date)}</p>
+                    </div>
+
+                    {/* Stats grid — 4 cols */}
+                    <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {/* Session timer */}
+                      <div>
+                        <p className={`text-sm font-bold font-mono ${studiedSecs > 0 ? 'text-sky-300' : 'text-slate-600'}`}>
+                          {studiedSecs > 0 ? fmtSecs(studiedSecs) : '—'}
+                        </p>
+                        <p className="text-xs text-slate-500">timer</p>
+                      </div>
+                      {/* Content watched */}
+                      <div>
+                        <p className={`text-sm font-bold font-mono ${met ? 'text-emerald-300' : mins > 0 ? 'text-slate-300' : 'text-slate-600'}`}>
+                          {mins > 0 ? fmtMins(mins) : '—'}
+                        </p>
+                        <p className="text-xs text-slate-500">content</p>
+                      </div>
+                      {/* Lectures */}
+                      <div>
+                        <p className={`text-sm font-bold font-mono ${(rec.lecturesCompleted ?? 0) > 0 ? 'text-violet-300' : 'text-slate-600'}`}>
+                          {rec.lecturesCompleted ?? 0}
+                        </p>
+                        <p className="text-xs text-slate-500">lectures</p>
+                      </div>
+                      {/* Cumulative % */}
+                      <div>
+                        <p className="text-sm font-bold font-mono text-indigo-300">
+                          {(rec.completionPct ?? 0).toFixed(1)}%
+                        </p>
+                        <p className="text-xs text-slate-500">cumul.</p>
+                      </div>
+                    </div>
+
+                    {/* Goal badge */}
+                    <div className="flex-shrink-0 text-center">
+                      <div
+                        className={`w-8 h-8 rounded-full flex items-center justify-center mx-auto ${
+                          met ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700/40 text-slate-600'
+                        }`}
+                      >
+                        {met ? <CheckCircle2 size={16} /> : <Circle size={16} />}
+                      </div>
+                      <p className={`text-xs mt-0.5 font-medium ${met ? 'text-emerald-500' : 'text-slate-600'}`}>
+                        {met ? 'Met' : 'Missed'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Goal bar */}
+                  <div className="mt-3">
+                    <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full"
+                        style={{
+                          width: `${goalPct}%`,
+                          background: met
+                            ? 'linear-gradient(90deg,#10b981,#34d399)'
+                            : 'linear-gradient(90deg,#6366f1,#a78bfa)',
+                        }}
+                      />
+                    </div>
+                    <div className="flex justify-between mt-0.5">
+                      <span className="text-xs text-slate-700 font-mono">0m content</span>
+                      <span className="text-xs text-slate-700 font-mono">240m goal</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
     </section>
