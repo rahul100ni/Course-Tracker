@@ -1237,16 +1237,16 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
 
         {/* Row 1: Analytics + Timer column */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
 
-          {/* Left: metric cards + progress */}
-          <div className="lg:col-span-2 space-y-3">
+          {/* Left: metric cards + progress — flex-col so progress card can stretch to match right column height */}
+          <div className="lg:col-span-2 flex flex-col gap-3">
             <div className="grid grid-cols-3 gap-3">
               <MetricCard icon={Clock}        label="Total Duration" value={fmtMins(TOTAL_MINS)}    sub={`${COURSE_DATA.length} lectures`}              accent="indigo"  />
               <MetricCard icon={CheckCircle2} label="Completed"      value={fmtMins(completedMins)} sub={`${completedIds.size} done`}                   accent="emerald" />
               <MetricCard icon={TrendingUp}   label="Remaining"      value={fmtMins(remainingMins)} sub={`${COURSE_DATA.length - completedIds.size} left`} accent="amber"   />
             </div>
-            <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4">
+            <div className="flex-1 rounded-xl border border-slate-700/50 bg-slate-800/30 p-4">
               <div className="flex items-center gap-2 mb-3">
                 <Zap size={13} className="text-indigo-400" />
                 <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Course Progress</span>
