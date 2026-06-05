@@ -5,6 +5,8 @@ import {
   Circle, CheckSquare, Target, Flame, BarChart3, Calendar,
 } from 'lucide-react';
 import { COURSE_DATA } from './courseData';
+import { ref, set } from 'firebase/database';
+import { db } from './firebase';
 
 /* ═══════════════════════════════════════════════════════════════
    CONSTANTS
@@ -708,6 +710,21 @@ export default function App() {
     }
     return s;
   }, [courseHistoryByDay, todayCourseMins]);
+
+  // ── Sync Live Stats to Firebase ──────────────────────────────
+  useEffect(() => {
+    const today = todayISO();
+    const completedLecturesToday = COURSE_DATA
+      .filter(l => completedIds.has(l.id) && lectureDates[l.id] === today)
+      .map(l => l.title);
+    
+    set(ref(db, 'users/rahul/liveStats'), {
+      todayStudySeconds: dailyStudy[today] || 0,
+      todayCourseMins,
+      completedLecturesToday,
+      updatedAt: new Date().toISOString()
+    }).catch(err => console.error('Firebase sync failed:', err));
+  }, [dailyStudy, todayCourseMins, completedIds, lectureDates]);
 
   // ── Timer tick: update daily study seconds ────────────────────
   // Uses ref-based pattern: read ref → compute next → update ref + storage + state
