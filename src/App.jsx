@@ -279,6 +279,8 @@ function Stopwatch({ onTick, onAdjust }) {
   };
 
   const reset = () => {
+    if (!confirm("Are you sure you want to reset today's study timer? This will clear today's study progress.")) return;
+    const oldElapsed = elapsedRef.current;
     setRunning(false);
     setElapsed(0);
     elapsedRef.current  = 0;
@@ -287,6 +289,7 @@ function Stopwatch({ onTick, onAdjust }) {
     const resetData = { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null };
     ss(K.TIMER, resetData);
     set(ref(db, 'users/rahul/stats/timer'), resetData).catch(err => console.error(err));
+    onAdjustRef.current?.(-oldElapsed);
   };
 
   const startEdit = () => {
@@ -983,6 +986,14 @@ export default function App() {
             }
           }
 
+          // Force the timer to start from today's cumulative daily study time!
+          const today = todayISO();
+          const todaySeconds = calculatedDailyStudy[today] || 0;
+          calculatedTimer.sessionElapsed = todaySeconds;
+          if (calculatedTimer.sessionStartTs) {
+            calculatedTimer.sessionStartTs = Date.now() - todaySeconds * 1000;
+          }
+
           // Update localStorage cache
           ss(K.COMPLETED, savedCompleted);
           ss(K.LECTURE_DATES, savedLectureDates);
@@ -1001,7 +1012,15 @@ export default function App() {
           const initialCompleted = ls(K.COMPLETED, []);
           const initialLectureDates = ls(K.LECTURE_DATES, {});
           const initialDailyStudy = ls(K.DAILY_STUDY, {});
-          const initialTimer = ls(K.TIMER, { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null });
+          
+          // Force initial timer to match today's daily study progress
+          const today = todayISO();
+          const todaySeconds = initialDailyStudy[today] || 0;
+          const initialTimer = {
+            sessionElapsed: todaySeconds,
+            sessionStartTs: null,
+            lastSavedTs: Date.now()
+          };
 
           if (isBackupImported) {
             localStorage.removeItem('cst_backup_imported');
@@ -1017,6 +1036,11 @@ export default function App() {
           // Save to Firebase
           set(statsRef, initialStats)
             .then(() => {
+              ss(K.COMPLETED, initialCompleted);
+              ss(K.LECTURE_DATES, initialLectureDates);
+              ss(K.DAILY_STUDY, initialDailyStudy);
+              ss(K.TIMER, initialTimer);
+
               setCompletedIds(new Set(initialCompleted));
               setLectureDates(initialLectureDates);
               setDailyStudy(initialDailyStudy);
