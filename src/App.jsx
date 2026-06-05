@@ -180,7 +180,7 @@ function CourseProgressBar({ pct }) {
    3. beforeunload shows browser popup when timer is active.
    4. onTick called once per second for daily study tracking.
 ═══════════════════════════════════════════════════════════════ */
-function Stopwatch({ onTick, onAdjust }) {
+function Stopwatch({ onTick, onAdjust, firebaseInitialElapsed, onRunningChange }) {
   const timerInit              = useMemo(initTimer, []);
   const [elapsed, setElapsed]  = useState(timerInit.elapsed);
   const [running, setRunning]  = useState(timerInit.running);
@@ -200,6 +200,20 @@ function Stopwatch({ onTick, onAdjust }) {
   useEffect(() => { runningRef.current = running; }, [running]);
   useEffect(() => { onTickRef.current  = onTick;  }, [onTick]);
   useEffect(() => { onAdjustRef.current = onAdjust; }, [onAdjust]);
+
+  // Sync to Firebase-loaded value once it arrives (overrides stale localStorage init)
+  const firebaseInitApplied = useRef(false);
+  useEffect(() => {
+    if (firebaseInitialElapsed == null || firebaseInitApplied.current) return;
+    firebaseInitApplied.current = true;
+    const newElapsed = firebaseInitialElapsed;
+    elapsedRef.current = newElapsed;
+    setElapsed(newElapsed);
+    // If currently running, re-anchor startTs to keep timer continuous
+    if (runningRef.current) {
+      startTsRef.current = Date.now() - newElapsed * 1000;
+    }
+  }, [firebaseInitialElapsed]);
 
   // persistTimer: ONLY anchor when running, ONLY elapsed when paused, plus lastSavedTs
   const persistTimer = useCallback((el, run) => {
@@ -276,6 +290,7 @@ function Stopwatch({ onTick, onAdjust }) {
     }
     setRunning(next);
     persistTimer(elapsedRef.current, next);
+    onRunningChange?.(next);
   };
 
   const reset = () => {
@@ -290,6 +305,7 @@ function Stopwatch({ onTick, onAdjust }) {
     ss(K.TIMER, resetData);
     set(ref(db, 'users/rahul/stats/timer'), resetData).catch(err => console.error(err));
     onAdjustRef.current?.(-oldElapsed);
+    onRunningChange?.(false);
   };
 
   const startEdit = () => {
@@ -1061,6 +1077,7 @@ export default function App() {
   }, []);
 
   // ── Sync Live Stats to Firebase ──────────────────────────────
+  const [timerRunning, setTimerRunning] = useState(false);
   useEffect(() => {
     if (!firebaseLoaded) return;
     const today = todayISO();
@@ -1072,9 +1089,10 @@ export default function App() {
       todayStudySeconds: dailyStudy[today] || 0,
       todayCourseMins,
       completedLecturesToday,
+      timerRunning,
       updatedAt: new Date().toISOString()
     }).catch(err => console.error('Firebase sync failed:', err));
-  }, [dailyStudy, todayCourseMins, completedIds, lectureDates, firebaseLoaded]);
+  }, [dailyStudy, todayCourseMins, completedIds, lectureDates, firebaseLoaded, timerRunning]);
 
   // ── Timer tick: update daily study seconds ────────────────────
   // Uses ref-based pattern: read ref → compute next → update ref + storage + state
@@ -1093,6 +1111,7 @@ export default function App() {
     set(ref(db, 'users/rahul/stats/dailyStudy'), next).catch(err => console.error(err));
 
     setDailyStudy(next);            // schedule re-render
+    setTimerRunning(true);          // keep liveStats in sync
   }, []);
 
   const handleTimerAdjust = useCallback((delta) => {
@@ -1216,7 +1235,12 @@ export default function App() {
 
           {/* Right: timer + daily goal */}
           <div className="lg:col-span-1 flex flex-col gap-3">
-            <Stopwatch onTick={handleTimerTick} onAdjust={handleTimerAdjust} />
+            <Stopwatch
+              onTick={handleTimerTick}
+              onAdjust={handleTimerAdjust}
+              firebaseInitialElapsed={firebaseLoaded ? (dailyStudy[todayISO()] ?? 0) : null}
+              onRunningChange={setTimerRunning}
+            />
             <DailyGoalCard todayCourseMins={todayCourseMins} streak={streak} />
           </div>
         </div>
@@ -1250,7 +1274,7 @@ export default function App() {
         <footer className="py-4 border-t border-slate-800/50">
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
             <p className="text-xs text-slate-600">
-              All progress auto-saved · localStorage · {new Date().getFullYear()}
+              All progress synced to Firebase · backed up locally · {new Date().getFullYear()}
             </p>
             <div className="flex gap-2">
               {/* Export */}
