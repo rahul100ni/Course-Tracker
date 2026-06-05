@@ -207,33 +207,54 @@ function Stopwatch({ onTick }) {
   useEffect(() => {
     if (!running) return;
     const id = setInterval(() => {
-      elapsedRef.current += 1;
-      setElapsed(elapsedRef.current);           // sync UI — pure value, no updater fn
-      persistTimer(elapsedRef.current, true);   // save
-      onTickRef.current?.();                    // notify App (for daily study)
+      const currentElapsed = Math.floor((Date.now() - startTsRef.current) / 1000);
+      const delta = currentElapsed - elapsedRef.current;
+      if (delta > 0) {
+        elapsedRef.current = currentElapsed;
+        setElapsed(currentElapsed);
+        persistTimer(currentElapsed, true);
+        onTickRef.current?.(delta);
+      }
     }, 1000);
     return () => clearInterval(id);
   }, [running, persistTimer]);
 
-  // Save on visibility change (backgrounded tab — no popup needed)
+  // Catch up and save on visibility change
   useEffect(() => {
-    const onHide = () => {
+    const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
         persistTimer(elapsedRef.current, runningRef.current);
+      } else if (document.visibilityState === 'visible' && runningRef.current) {
+        const currentElapsed = Math.floor((Date.now() - startTsRef.current) / 1000);
+        const delta = currentElapsed - elapsedRef.current;
+        if (delta > 0) {
+          elapsedRef.current = currentElapsed;
+          setElapsed(currentElapsed);
+          onTickRef.current?.(delta);
+          persistTimer(currentElapsed, true);
+        }
       }
     };
-    document.addEventListener('visibilitychange', onHide);
-    return () => document.removeEventListener('visibilitychange', onHide);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [persistTimer]);
 
-  // beforeunload: show popup when running, always save
+  // beforeunload: show popup when running, catch up and save
   useEffect(() => {
     const onUnload = (e) => {
-      persistTimer(elapsedRef.current, runningRef.current);
       if (runningRef.current) {
+        const currentElapsed = Math.floor((Date.now() - startTsRef.current) / 1000);
+        const delta = currentElapsed - elapsedRef.current;
+        if (delta > 0) {
+          onTickRef.current?.(delta);
+        }
+        persistTimer(currentElapsed, true);
+
         // Triggers browser's "Leave site?" dialog
         e.preventDefault();
         e.returnValue = '';
+      } else {
+        persistTimer(elapsedRef.current, false);
       }
     };
     window.addEventListener('beforeunload', onUnload);
@@ -719,9 +740,21 @@ export default function App() {
     get(statsRef)
       .then((snapshot) => {
         const isBackupImported = localStorage.getItem('cst_backup_imported') === 'true';
+        const localTimer = ls(K.TIMER, {});
 
+        let stats = snapshot.val();
+        let useLocalCache = isBackupImported;
+
+        // Conflict Resolution: If localStorage has a newer save than Firebase,
+        // use local cache to avoid overwriting recent unsaved changes (e.g. on closed tabs)
         if (snapshot.exists() && !isBackupImported) {
-          const stats = snapshot.val();
+          const firebaseTimer = stats.timer || { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: 0 };
+          if (localTimer.lastSavedTs && firebaseTimer.lastSavedTs && localTimer.lastSavedTs > firebaseTimer.lastSavedTs) {
+            useLocalCache = true;
+          }
+        }
+
+        if (snapshot.exists() && !useLocalCache) {
           const savedCompleted = stats.completed || [];
           const savedLectureDates = stats.lectureDates || {};
           const savedDailyStudy = stats.dailyStudy || {};
@@ -752,11 +785,11 @@ export default function App() {
           setLectureDates(savedLectureDates);
           setDailyStudy(calculatedDailyStudy);
         } else {
-          // Database is empty OR backup was just imported.
-          const initialCompleted = isBackupImported ? ls(K.COMPLETED, []) : [];
-          const initialLectureDates = isBackupImported ? ls(K.LECTURE_DATES, {}) : {};
-          const initialDailyStudy = isBackupImported ? ls(K.DAILY_STUDY, {}) : {};
-          const initialTimer = isBackupImported ? ls(K.TIMER, { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null }) : { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null };
+          // Database is empty OR backup was just imported OR local cache is newer.
+          const initialCompleted = ls(K.COMPLETED, []);
+          const initialLectureDates = ls(K.LECTURE_DATES, {});
+          const initialDailyStudy = ls(K.DAILY_STUDY, {});
+          const initialTimer = ls(K.TIMER, { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null });
 
           if (isBackupImported) {
             localStorage.removeItem('cst_backup_imported');
@@ -772,11 +805,6 @@ export default function App() {
           // Save to Firebase
           set(statsRef, initialStats)
             .then(() => {
-              ss(K.COMPLETED, initialCompleted);
-              ss(K.LECTURE_DATES, initialLectureDates);
-              ss(K.DAILY_STUDY, initialDailyStudy);
-              ss(K.TIMER, initialTimer);
-
               setCompletedIds(new Set(initialCompleted));
               setLectureDates(initialLectureDates);
               setDailyStudy(initialDailyStudy);
@@ -815,12 +843,12 @@ export default function App() {
   // ── Timer tick: update daily study seconds ────────────────────
   // Uses ref-based pattern: read ref → compute next → update ref + storage + state
   // (Never calls setState inside another setState updater)
-  const handleTimerTick = useCallback(() => {
+  const handleTimerTick = useCallback((delta = 1) => {
     if (!dailyStudyRef.current) return;
     const today = todayISO();
     const next  = {
       ...dailyStudyRef.current,
-      [today]: (dailyStudyRef.current[today] ?? 0) + 1,
+      [today]: (dailyStudyRef.current[today] ?? 0) + delta,
     };
     dailyStudyRef.current = next;   // immediate ref update
     ss(K.DAILY_STUDY, next);        // persist
