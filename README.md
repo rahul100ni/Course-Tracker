@@ -1,16 +1,62 @@
-# React + Vite
+# 📚 Algorithms Course Tracker
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A premium, high-density, highly interactive single-page Course Study Tracker & Stopwatch Application designed for deep focus. 
 
-Currently, two official plugins are available:
+Built with **React**, **Tailwind CSS v3**, and **Vite**.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+![App Preview](https://via.placeholder.com/1000x500.png?text=Course+Tracker+Dashboard)
 
-## React Compiler
+## ✨ Features
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+* **Session Focus Hub (The Timer)**: A precise stopwatch to track active, real-time study sessions. Resilient to tab closures and browser refreshes—your elapsed time is securely saved and automatically resumes.
+* **Daily Goal Card**: Tracks your daily course consumption against a customizable target (e.g., 4 hours). Displays dynamic color shifts (Indigo → Amber → Emerald) as you approach and meet your goal.
+* **Interactive Syllabus**: Collapsible, accordion-style sections containing individual lectures. Ticking off lectures instantly updates your progress globally.
+* **Study History Dashboard**: A persistent historical log of your study habits. Review daily time tracked, content consumed, lectures finished, and overall completion percentage.
+* **Streak Tracker**: Maintains a streak counter (🔥) for consecutive days you meet your content goal.
+* **100% Local Persistence**: All your progress, histories, and timer states are automatically saved directly in your browser's `localStorage`. No accounts, no cloud sync delays, no data loss.
+* **Data Portability**: Easily export your entire progress to a JSON backup file and import it back on any other device or browser.
 
-## Expanding the ESLint configuration
+## 🚀 Quick Start (Local Development)
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+1. **Clone the repository**
+   ```bash
+   git clone https://github.com/rahul100ni/Course-Tracker.git
+   cd Course-Tracker
+   ```
+
+2. **Install dependencies**
+   ```bash
+   npm install
+   ```
+
+3. **Start the development server**
+   ```bash
+   npm run dev
+   ```
+
+## 🛠️ Build for Production
+
+To create a static production build:
+
+```bash
+npm run build
+```
+The output will be placed in the `dist` folder. Because the project uses `base: './'` in its Vite configuration, you can simply open the built `dist/index.html` file directly in your browser without needing a web server!
+
+## 🌐 Deploying to Vercel
+
+This app is optimized for seamless zero-config deployment on Vercel:
+1. Log in to [Vercel](https://vercel.com).
+2. Click **Add New → Project**.
+3. Import this repository.
+4. Leave the Framework Preset as **Vite**.
+5. Click **Deploy**.
+
+## 🎨 Design Philosophy
+
+* **Vibe**: Premium, clean, and high-density, inspired by advanced IDEs and top-tier learning platforms.
+* **Aesthetics**: Ultra-modern, high-contrast dark mode using deep slate backgrounds coupled with vibrant indigo, emerald, and amber accent colors.
+* **UX**: Fast, responsive, and distraction-free to optimize long study sessions.
+
+---
+*Built with ❤️ for focused learning.*
