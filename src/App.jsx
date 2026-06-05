@@ -130,17 +130,20 @@ function initDailyStudy() {
 ═══════════════════════════════════════════════════════════════ */
 function MetricCard({ icon: Icon, label, value, sub, accent }) {
   const styles = {
-    indigo:  'text-indigo-400 bg-indigo-500/10 border-indigo-500/20',
-    emerald: 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20',
-    amber:   'text-amber-400 bg-amber-500/10 border-amber-500/20',
+    indigo:  { wrap: 'border-indigo-500/20 bg-indigo-500/10', icon: 'text-indigo-400 bg-indigo-500/15', text: 'text-indigo-300' },
+    emerald: { wrap: 'border-emerald-500/20 bg-emerald-500/10', icon: 'text-emerald-400 bg-emerald-500/15', text: 'text-emerald-300' },
+    amber:   { wrap: 'border-amber-500/20 bg-amber-500/10', icon: 'text-amber-400 bg-amber-500/15', text: 'text-amber-300' },
   };
+  const s = styles[accent];
   return (
-    <div className={`rounded-xl border p-4 flex items-start gap-3 ${styles[accent]}`}>
-      <div className="mt-0.5 flex-shrink-0"><Icon size={18} /></div>
+    <div className={`rounded-xl border p-4 flex flex-col gap-3 ${s.wrap}`}>
+      <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${s.icon}`}>
+        <Icon size={16} />
+      </div>
       <div className="min-w-0">
-        <p className="text-xs font-medium uppercase tracking-widest opacity-60 mb-1">{label}</p>
-        <p className="text-2xl font-bold font-mono leading-none">{value}</p>
-        {sub && <p className="text-xs opacity-50 mt-1">{sub}</p>}
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-1.5">{label}</p>
+        <p className={`text-xl font-bold font-mono leading-none ${s.text}`}>{value}</p>
+        {sub && <p className="text-xs text-slate-600 mt-1.5">{sub}</p>}
       </div>
     </div>
   );
@@ -399,59 +402,67 @@ function Stopwatch({ onTick, onAdjust, firebaseInitialElapsed, onRunningChange }
   }
 
   return (
-    <div className="rounded-xl border border-slate-700/60 bg-slate-800/40 p-5 flex flex-col gap-4">
-      <div className="flex items-center gap-2 text-slate-400">
-        <Timer size={15} />
-        <span className="text-xs font-semibold uppercase tracking-widest">Session Timer</span>
-        {running && (
-          <span className="ml-auto flex items-center gap-1.5 text-emerald-400 text-xs font-semibold">
-            <span className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-            Live
-          </span>
-        )}
+    <div className={`rounded-xl border p-5 flex flex-col gap-3 transition-colors duration-300 ${
+      running ? 'border-indigo-500/30 bg-indigo-500/5' : 'border-slate-700/60 bg-slate-800/40'
+    }`}>
+      {/* Header row */}
+      <div className="flex items-center gap-2">
+        <Timer size={14} className={running ? 'text-indigo-400' : 'text-slate-500'} />
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Today's Study Time</span>
+        <span className={`ml-auto flex items-center gap-1.5 text-xs font-semibold ${
+          running ? 'text-emerald-400' : 'text-slate-600'
+        }`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${
+            running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'
+          }`} />
+          {running ? 'Live' : 'Paused'}
+        </span>
       </div>
 
-      <div className="text-center py-1">
+      {/* Clock */}
+      <div className="text-center py-2">
         <span
-          className={`text-6xl font-bold font-mono tracking-widest tabular-nums transition-colors duration-300 ${
-            running ? 'text-indigo-300' : 'text-slate-400'
+          className={`text-5xl font-bold font-mono tracking-widest tabular-nums transition-colors duration-300 ${
+            running ? 'text-indigo-300' : 'text-slate-500'
           }`}
         >
           {fmtClock(elapsed)}
         </span>
-        {elapsed > 0 && !running && (
-          <p className="text-xs text-slate-500 mt-1.5">{fmtSecs(elapsed)} this session · paused</p>
-        )}
+        <p className="text-xs text-slate-600 mt-1.5 h-4">
+          {elapsed > 0 ? `${fmtSecs(elapsed)} studied today` : 'Timer not started yet'}
+        </p>
       </div>
 
-      <div className="flex gap-2 justify-center">
+      {/* Buttons */}
+      <div className="flex gap-2">
         <button
           id="timer-toggle"
           onClick={toggle}
-          className={`flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 ${
+          className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 ${
             running
               ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30'
               : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30'
           }`}
         >
-          {running ? <Pause size={15} /> : <Play size={15} />}
+          {running ? <Pause size={14} /> : <Play size={14} />}
           {running ? 'Pause' : 'Start'}
         </button>
         <button
           id="timer-reset"
           onClick={reset}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-slate-400 border border-slate-700/60 hover:bg-slate-700/40 hover:text-slate-200 transition-all duration-200"
+          className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg text-sm font-semibold text-slate-500 border border-slate-700/60 hover:bg-slate-700/40 hover:text-slate-300 transition-all duration-200"
         >
-          <RotateCcw size={15} /> Reset
+          <RotateCcw size={14} />
         </button>
       </div>
 
-      <div className="text-center mt-0.5">
+      {/* Subtle adjust link */}
+      <div className="text-center">
         <button
           onClick={startEdit}
-          className="text-[10px] text-slate-600 hover:text-slate-400 transition-colors uppercase tracking-wider font-bold"
+          className="text-[10px] text-slate-700 hover:text-slate-500 transition-colors uppercase tracking-widest font-semibold"
         >
-          Adjust Time
+          ··· adjust time
         </button>
       </div>
     </div>
@@ -479,43 +490,66 @@ function DailyGoalCard({ todayCourseMins, streak }) {
         met ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-slate-700/50 bg-slate-800/30'
       }`}
     >
+      {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Target size={14} className={met ? 'text-emerald-400' : 'text-amber-400'} />
-          <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
-            Daily Content Goal · 4h
+          <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+            Daily Content Goal
           </span>
         </div>
-        {streak > 0 && (
-          <span className="flex items-center gap-1 text-xs font-bold text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
-            <Flame size={11} /> {streak}d
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {streak > 0 && (
+            <span className="flex items-center gap-1 text-xs font-bold text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
+              <Flame size={11} /> {streak}d
+            </span>
+          )}
+          <span className="text-[10px] font-semibold text-slate-600 font-mono">/ 4h goal</span>
+        </div>
       </div>
 
+      {/* Progress numbers — clean single row */}
+      <div className="flex items-end justify-between">
+        <div>
+          <p className={`text-2xl font-bold font-mono leading-none ${
+            met ? 'text-emerald-300' : todayCourseMins > 0 ? 'text-slate-200' : 'text-slate-600'
+          }`}>
+            {fmtMins(todayCourseMins) || '0m'}
+          </p>
+          <p className="text-[10px] text-slate-600 mt-1">watched today</p>
+        </div>
+        <div className="text-right">
+          <p className={`text-sm font-bold font-mono leading-none ${
+            met ? 'text-emerald-400' : 'text-slate-500'
+          }`}>
+            {met ? '+' + (over > 0 ? fmtMins(over) : '0m') : fmtMins(remaining)}
+          </p>
+          <p className="text-[10px] text-slate-600 mt-1">{met ? 'over goal' : 'remaining'}</p>
+        </div>
+      </div>
+
+      {/* Bar */}
       <div>
-        <div className="flex justify-between items-baseline mb-2">
-          <span className={`text-xl font-bold font-mono ${met ? 'text-emerald-300' : 'text-slate-200'}`}>
-            {todayCourseMins > 0 ? fmtMins(todayCourseMins) : '0m'}
-          </span>
-          <span className="text-xs text-slate-500 font-mono">/ 4h 0m of content</span>
+        <div className="h-2 bg-slate-800/80 rounded-full overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all duration-700 ease-out"
+            style={{ width: `${pct}%`, background: barBg }}
+          />
         </div>
-        <div className="h-2 bg-slate-800 rounded-full overflow-hidden border border-slate-700/50">
-          <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: barBg }} />
-        </div>
-        <div className="flex justify-between mt-1">
-          <span className="text-xs text-slate-600 font-mono">{pct.toFixed(0)}%</span>
-          <span className="text-xs text-slate-600 font-mono">240m</span>
+        <div className="flex justify-between mt-1.5">
+          <span className={`text-[10px] font-semibold font-mono ${
+            met ? 'text-emerald-500' : 'text-slate-600'
+          }`}>{pct.toFixed(0)}% complete</span>
+          <span className="text-[10px] text-slate-700 font-mono">240m</span>
         </div>
       </div>
 
+      {/* Status text */}
       <p className="text-xs">
         {met ? (
-          <span className="text-emerald-400 font-semibold">
-            🎯 Goal met!{over > 0 ? ` · +${fmtMins(over)} bonus` : ''}
-          </span>
+          <span className="text-emerald-400 font-semibold">🎯 Daily goal hit!{over > 0 ? ` +${fmtMins(over)} bonus` : ''}</span>
         ) : todayCourseMins === 0 ? (
-          <span className="text-slate-500">Tick off lectures below to track today's content</span>
+          <span className="text-slate-600">Tick off lectures below to track today's content</span>
         ) : (
           <span className="text-slate-400">
             <span className="text-slate-200 font-semibold">{fmtMins(remaining)}</span> of content left to hit goal
@@ -1203,30 +1237,30 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
 
         {/* Row 1: Analytics + Timer column */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
 
           {/* Left: metric cards + progress */}
-          <div className="lg:col-span-2 space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="lg:col-span-2 space-y-3">
+            <div className="grid grid-cols-3 gap-3">
               <MetricCard icon={Clock}        label="Total Duration" value={fmtMins(TOTAL_MINS)}    sub={`${COURSE_DATA.length} lectures`}              accent="indigo"  />
-              <MetricCard icon={CheckCircle2} label="Completed"      value={fmtMins(completedMins)} sub={`${completedIds.size} lectures done`}           accent="emerald" />
+              <MetricCard icon={CheckCircle2} label="Completed"      value={fmtMins(completedMins)} sub={`${completedIds.size} done`}                   accent="emerald" />
               <MetricCard icon={TrendingUp}   label="Remaining"      value={fmtMins(remainingMins)} sub={`${COURSE_DATA.length - completedIds.size} left`} accent="amber"   />
             </div>
-            <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-5">
-              <div className="flex items-center gap-2 mb-4">
-                <Zap size={14} className="text-indigo-400" />
-                <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">Course Progress</span>
+            <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Zap size={13} className="text-indigo-400" />
+                <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Course Progress</span>
               </div>
               <CourseProgressBar pct={coursePct} />
-              <div className="mt-4 grid grid-cols-3 gap-2 text-center">
+              <div className="mt-3 grid grid-cols-3 gap-2 text-center">
                 {[
-                  { label: 'Sections',  value: SECTIONS.length },
-                  { label: 'Done',      value: completedIds.size },
-                  { label: 'Remaining', value: COURSE_DATA.length - completedIds.size },
+                  { label: 'Sections',  value: SECTIONS.length,                                  color: 'text-indigo-300' },
+                  { label: 'Done',      value: completedIds.size,                                color: 'text-emerald-300' },
+                  { label: 'Remaining', value: COURSE_DATA.length - completedIds.size,           color: 'text-amber-300' },
                 ].map(item => (
-                  <div key={item.label} className="rounded-lg bg-slate-900/60 border border-slate-800 py-2">
-                    <p className="text-lg font-bold font-mono text-slate-200">{item.value}</p>
-                    <p className="text-xs text-slate-500 uppercase tracking-wider">{item.label}</p>
+                  <div key={item.label} className="rounded-lg bg-slate-900/50 border border-slate-800/80 py-2.5">
+                    <p className={`text-base font-bold font-mono ${item.color}`}>{item.value}</p>
+                    <p className="text-[10px] text-slate-600 uppercase tracking-wider mt-0.5">{item.label}</p>
                   </div>
                 ))}
               </div>
