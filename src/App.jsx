@@ -2,25 +2,24 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Play, Pause, RotateCcw, ChevronDown, ChevronRight, ChevronUp,
   Clock, CheckCircle2, BookOpen, Zap, Timer, TrendingUp,
-  Circle, CheckSquare, Target, Flame, BarChart3, Calendar,
+  Circle, CheckSquare, Target, Flame, BarChart3, Calendar, Settings,
 } from 'lucide-react';
-import { COURSE_DATA } from './courseData';
+import { SUBJECTS, SUBJECT_LIST } from './subjects/index';
 import { ref, set, get } from 'firebase/database';
 import { db } from './firebase';
 
 /* ═══════════════════════════════════════════════════════════════
-   CONSTANTS
+   STORAGE KEYS (v5 — multi-subject)
 ═══════════════════════════════════════════════════════════════ */
-const DAILY_GOAL_MINS = 240; // 4 hours of course content
-
 const K = {
-  COMPLETED:     'cst_v4_completed_ids',
-  // Timer: when RUNNING save only { sessionStartTs }
-  //        when PAUSED  save only { sessionElapsed, sessionStartTs: null }
-  // This prevents the double-add bug on restore.
-  TIMER:        'cst_v4_timer',
-  LECTURE_DATES:'cst_v4_lecture_dates',  // { [id]: "YYYY-MM-DD" }
-  DAILY_STUDY:  'cst_v4_daily_study',    // { "YYYY-MM-DD": totalSeconds }
+  TIMER:               'cst_v5_global_timer',
+  DAILY_STUDY:         'cst_v5_global_daily_study',
+  SUBJECT_DAILY_STUDY: 'cst_v5_subject_daily_study',
+  ACTIVE_SUBJECT:      'cst_v5_active_subject',
+  SUBJECT_SETTINGS:    'cst_v5_subject_settings',
+  // Per-subject: cst_v5_{id}_completed  and  cst_v5_{id}_lecture_dates
+  completed:    (id) => `cst_v5_${id}_completed`,
+  lectureDates: (id) => `cst_v5_${id}_lecture_dates`,
 };
 
 /* ═══════════════════════════════════════════════════════════════
@@ -82,43 +81,25 @@ function fullDateLabel(ds) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   MODULE-LEVEL CONSTANTS
-═══════════════════════════════════════════════════════════════ */
-const TOTAL_MINS  = COURSE_DATA.reduce((s, l) => s + l.duration, 0);
-const SECTIONS    = groupBySection(COURSE_DATA);
-const LECTURE_MAP = Object.fromEntries(COURSE_DATA.map(l => [l.id, l]));
-
-/* ═══════════════════════════════════════════════════════════════
-   TIMER INIT
-   ─────────────────────────────────────────────────────────────
-   KEY FIX: when the timer is RUNNING we store ONLY sessionStartTs
-   (the anchor point = Date.now() – elapsed * 1000).
-   On restore we compute:  elapsed = Date.now() – sessionStartTs
-   This avoids double-counting sessionElapsed + awayTime.
+   TIMER INIT — unchanged logic, new key
 ═══════════════════════════════════════════════════════════════ */
 function initTimer() {
   const saved = ls(K.TIMER, {});
   if (saved.sessionStartTs) {
-    // Timer was running – derive elapsed purely from anchor
     const elapsed = Math.max(0, Math.floor((Date.now() - saved.sessionStartTs) / 1000));
     return { elapsed, running: true, startTs: saved.sessionStartTs };
   }
-  // Timer was paused (or never started)
   return { elapsed: saved.sessionElapsed ?? 0, running: false, startTs: null };
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   DAILY STUDY INIT
-   Adds away-seconds (based on lastSavedTs) to today when restore happens.
-═══════════════════════════════════════════════════════════════ */
 function initDailyStudy() {
   const ds    = { ...ls(K.DAILY_STUDY, {}) };
   const saved = ls(K.TIMER, {});
   if (saved.sessionStartTs && saved.lastSavedTs) {
     const awaySeconds = Math.max(0, Math.floor((Date.now() - saved.lastSavedTs) / 1000));
     if (awaySeconds > 0) {
-      const today     = todayISO();
-      ds[today]       = (ds[today] ?? 0) + awaySeconds;
+      const today = todayISO();
+      ds[today]   = (ds[today] ?? 0) + awaySeconds;
       ss(K.DAILY_STUDY, ds);
     }
   }
@@ -126,15 +107,44 @@ function initDailyStudy() {
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   ACCENT COLOUR MAP (used by MetricCard, DailyGoalCard, tabs)
+═══════════════════════════════════════════════════════════════ */
+const ACCENT = {
+  indigo: {
+    wrap: 'border-indigo-500/20 bg-indigo-500/10',
+    icon: 'text-indigo-400 bg-indigo-500/15',
+    text: 'text-indigo-300',
+    tab:  'bg-indigo-500/20 text-indigo-300 border-indigo-500/40',
+    ring: 'ring-indigo-500/30',
+  },
+  violet: {
+    wrap: 'border-violet-500/20 bg-violet-500/10',
+    icon: 'text-violet-400 bg-violet-500/15',
+    text: 'text-violet-300',
+    tab:  'bg-violet-500/20 text-violet-300 border-violet-500/40',
+    ring: 'ring-violet-500/30',
+  },
+  emerald: {
+    wrap: 'border-emerald-500/20 bg-emerald-500/10',
+    icon: 'text-emerald-400 bg-emerald-500/15',
+    text: 'text-emerald-300',
+    tab:  'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+    ring: 'ring-emerald-500/30',
+  },
+  amber: {
+    wrap: 'border-amber-500/20 bg-amber-500/10',
+    icon: 'text-amber-400 bg-amber-500/15',
+    text: 'text-amber-300',
+    tab:  'bg-amber-500/20 text-amber-300 border-amber-500/40',
+    ring: 'ring-amber-500/30',
+  },
+};
+
+/* ═══════════════════════════════════════════════════════════════
    COMPONENT: MetricCard
 ═══════════════════════════════════════════════════════════════ */
-function MetricCard({ icon: Icon, label, value, sub, accent }) {
-  const styles = {
-    indigo:  { wrap: 'border-indigo-500/20 bg-indigo-500/10', icon: 'text-indigo-400 bg-indigo-500/15', text: 'text-indigo-300' },
-    emerald: { wrap: 'border-emerald-500/20 bg-emerald-500/10', icon: 'text-emerald-400 bg-emerald-500/15', text: 'text-emerald-300' },
-    amber:   { wrap: 'border-amber-500/20 bg-amber-500/10', icon: 'text-amber-400 bg-amber-500/15', text: 'text-amber-300' },
-  };
-  const s = styles[accent];
+function MetricCard({ icon: Icon, label, value, sub, accent = 'indigo' }) {
+  const s = ACCENT[accent] || ACCENT.indigo;
   return (
     <div className={`rounded-xl border p-4 flex flex-col gap-3 ${s.wrap}`}>
       <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${s.icon}`}>
@@ -152,17 +162,23 @@ function MetricCard({ icon: Icon, label, value, sub, accent }) {
 /* ═══════════════════════════════════════════════════════════════
    COMPONENT: CourseProgressBar
 ═══════════════════════════════════════════════════════════════ */
-function CourseProgressBar({ pct }) {
+function CourseProgressBar({ pct, accent = 'indigo' }) {
+  const gradients = {
+    indigo: 'linear-gradient(90deg,#6366f1,#8b5cf6,#a78bfa)',
+    violet: 'linear-gradient(90deg,#7c3aed,#8b5cf6,#c4b5fd)',
+    emerald: 'linear-gradient(90deg,#10b981,#34d399)',
+    amber: 'linear-gradient(90deg,#f59e0b,#fbbf24)',
+  };
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">Overall Progress</span>
-        <span className="text-sm font-bold text-indigo-300 font-mono">{pct.toFixed(1)}%</span>
+        <span className={`text-sm font-bold font-mono ${ACCENT[accent]?.text || 'text-indigo-300'}`}>{pct.toFixed(1)}%</span>
       </div>
       <div className="h-2.5 bg-slate-800 rounded-full overflow-hidden border border-slate-700/50">
         <div
           className="h-full rounded-full transition-all duration-500 ease-out"
-          style={{ width: `${pct}%`, background: 'linear-gradient(90deg,#6366f1,#8b5cf6,#a78bfa)' }}
+          style={{ width: `${pct}%`, background: gradients[accent] || gradients.indigo }}
         />
       </div>
       <div className="flex justify-between mt-1">
@@ -176,224 +192,157 @@ function CourseProgressBar({ pct }) {
 /* ═══════════════════════════════════════════════════════════════
    COMPONENT: Stopwatch
    ─────────────────────────────────────────────────────────────
-   Fixes:
-   1. persistTimer saves ONLY anchor when running (no double-add).
-   2. setInterval callback is side-effect only (no setState updater
-      side effects → no StrictMode double-fire).
-   3. beforeunload shows browser popup when timer is active.
-   4. onTick called once per second for daily study tracking.
+   Props:
+     onTick(delta)           called every second while running
+     onAdjust(deltaMinutes)  called when user manually edits time
+     onReset()               called when user resets (App zeros dailyStudy)
+     firebaseInitialElapsed  seconds loaded once from Firebase on mount
+     onRunningChange(bool)   called when start/pause/reset
+
+   KEY DESIGN RULES (never violate):
+   - setInterval is NEVER started inside a React state-updater function.
+     Doing so causes React StrictMode to double-invoke it and creates
+     duplicate intervals (observed as 1→2→4 jumps).
+   - The interval is exclusively managed by a useEffect that watches
+     the `running` boolean.
+   - elapsedRef is the single source of truth for elapsed seconds;
+     `elapsed` state is only for rendering.
+   - firebaseInitialElapsed is consumed exactly once via a ref-guard;
+     it must not be passed as a live-changing value from the parent.
 ═══════════════════════════════════════════════════════════════ */
-function Stopwatch({ onTick, onAdjust, firebaseInitialElapsed, onRunningChange }) {
-  const timerInit              = useMemo(initTimer, []);
-  const [elapsed, setElapsed]  = useState(timerInit.elapsed);
-  const [running, setRunning]  = useState(timerInit.running);
+function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunningChange }) {
+  const [elapsed, setElapsed] = useState(() => initTimer().elapsed);
+  const [running, setRunning] = useState(() => initTimer().running);
+  const elapsedRef            = useRef(elapsed);
+  const runningRef            = useRef(running);
+  const startTsRef            = useRef(null);          // wall-clock start
+  const firebaseInitSyncedRef = useRef(false);
+  const onTickRef             = useRef(onTick);        // always-current refs so the
+  const persistTimerStableRef = useRef(null);         //   interval closure never goes stale
 
-  const [isEditing, setIsEditing] = useState(false);
-  const [editH, setEditH] = useState(0);
-  const [editM, setEditM] = useState(0);
-  const [editS, setEditS] = useState(0);
+  // Keep onTick ref current
+  useEffect(() => { onTickRef.current = onTick; }, [onTick]);
 
-  const elapsedRef  = useRef(timerInit.elapsed);
-  const runningRef  = useRef(timerInit.running);
-  const startTsRef  = useRef(timerInit.startTs);  // anchor: Date.now() – elapsed*1000
-  const onTickRef   = useRef(onTick);
-  const onAdjustRef = useRef(onAdjust);
+  // ── persistTimer (stable, no closure over state) ─────────────
+  const persistTimer = useCallback((el, run, startTs) => {
+    const payload = run
+      ? { sessionStartTs: startTs, sessionElapsed: el, lastSavedTs: Date.now() }
+      : { sessionElapsed: el, sessionStartTs: null,    lastSavedTs: Date.now() };
+    ss(K.TIMER, payload);
+    set(ref(db, 'users/rahul/global/timer'), payload).catch(console.error);
+  }, []);
+  useEffect(() => { persistTimerStableRef.current = persistTimer; }, [persistTimer]);
 
-  useEffect(() => { elapsedRef.current = elapsed; }, [elapsed]);
-  useEffect(() => { runningRef.current = running; }, [running]);
-  useEffect(() => { onTickRef.current  = onTick;  }, [onTick]);
-  useEffect(() => { onAdjustRef.current = onAdjust; }, [onAdjust]);
-
-  // Sync to Firebase-loaded value once it arrives (overrides stale localStorage init)
-  const firebaseInitApplied = useRef(false);
+  // ── Sync from Firebase exactly once ──────────────────────────
   useEffect(() => {
-    if (firebaseInitialElapsed == null || firebaseInitApplied.current) return;
-    firebaseInitApplied.current = true;
-    const newElapsed = firebaseInitialElapsed;
-    elapsedRef.current = newElapsed;
-    setElapsed(newElapsed);
-    // If currently running, re-anchor startTs to keep timer continuous
-    if (runningRef.current) {
-      startTsRef.current = Date.now() - newElapsed * 1000;
-    }
+    if (firebaseInitialElapsed === null) return;
+    if (firebaseInitSyncedRef.current) return;
+    firebaseInitSyncedRef.current = true;
+    elapsedRef.current = firebaseInitialElapsed;
+    setElapsed(firebaseInitialElapsed);
   }, [firebaseInitialElapsed]);
 
-  // persistTimer: ONLY anchor when running, ONLY elapsed when paused, plus lastSavedTs
-  const persistTimer = useCallback((el, run) => {
-    const timerData = run
-      ? { sessionStartTs: startTsRef.current, lastSavedTs: Date.now() }
-      : { sessionElapsed: el, sessionStartTs: null, lastSavedTs: Date.now() };
-    ss(K.TIMER, timerData);
-    set(ref(db, 'users/rahul/stats/timer'), timerData).catch(err => console.error('Timer sync failed:', err));
-  }, []);
-
-  // Tick every second — all side effects outside state updaters
+  // ── Interval managed entirely by useEffect (StrictMode-safe) ─
   useEffect(() => {
-    if (!running) return;
+    if (!running) {
+      // Cleanup if interval is still running (e.g. after reset)
+      return;
+    }
+    // Compute startTs from current elapsed so resuming is seamless
+    const startTs = Date.now() - elapsedRef.current * 1000;
+    startTsRef.current = startTs;
+    persistTimerStableRef.current?.(elapsedRef.current, true, startTs);
+
     const id = setInterval(() => {
-      const currentElapsed = Math.floor((Date.now() - startTsRef.current) / 1000);
-      const delta = currentElapsed - elapsedRef.current;
-      if (delta > 0) {
-        elapsedRef.current = currentElapsed;
-        setElapsed(currentElapsed);
-        persistTimer(currentElapsed, true);
-        onTickRef.current?.(delta);
+      elapsedRef.current += 1;
+      setElapsed(elapsedRef.current);
+      onTickRef.current?.(1);
+      if (elapsedRef.current % 10 === 0) {
+        persistTimerStableRef.current?.(elapsedRef.current, true, startTs);
       }
     }, 1000);
-    return () => clearInterval(id);
-  }, [running, persistTimer]);
 
-  // Catch up and save on visibility change
-  useEffect(() => {
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
-        persistTimer(elapsedRef.current, runningRef.current);
-      } else if (document.visibilityState === 'visible' && runningRef.current) {
-        const currentElapsed = Math.floor((Date.now() - startTsRef.current) / 1000);
-        const delta = currentElapsed - elapsedRef.current;
-        if (delta > 0) {
-          elapsedRef.current = currentElapsed;
-          setElapsed(currentElapsed);
-          onTickRef.current?.(delta);
-          persistTimer(currentElapsed, true);
-        }
-      }
+    return () => {
+      clearInterval(id);
+      // Persist paused state when effect tears down
+      persistTimerStableRef.current?.(elapsedRef.current, false, null);
     };
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [persistTimer]);
+  }, [running]); // ← only re-runs when running flips
 
-  // beforeunload: show popup when running, catch up and save
-  useEffect(() => {
-    const onUnload = (e) => {
-      if (runningRef.current) {
-        const currentElapsed = Math.floor((Date.now() - startTsRef.current) / 1000);
-        const delta = currentElapsed - elapsedRef.current;
-        if (delta > 0) {
-          onTickRef.current?.(delta);
-        }
-        persistTimer(currentElapsed, true);
+  // ── Controls ─────────────────────────────────────────────────
+  const toggle = useCallback(() => {
+    setRunning(prev => {
+      const next = !prev;
+      runningRef.current = next;
+      onRunningChange?.(next);
+      return next;
+    });
+  }, [onRunningChange]);
 
-        // Triggers browser's "Leave site?" dialog
-        e.preventDefault();
-        e.returnValue = '';
-      } else {
-        persistTimer(elapsedRef.current, false);
-      }
-    };
-    window.addEventListener('beforeunload', onUnload);
-    return () => window.removeEventListener('beforeunload', onUnload);
-  }, [persistTimer]);
-
-  const toggle = () => {
-    const next = !runningRef.current;
-    if (next) {
-      // Set anchor: always derived from current elapsed
-      startTsRef.current = Date.now() - elapsedRef.current * 1000;
-    }
-    setRunning(next);
-    persistTimer(elapsedRef.current, next);
-    onRunningChange?.(next);
-  };
-
-  const reset = () => {
-    if (!confirm("Are you sure you want to reset today's study timer? This will clear today's study progress.")) return;
-    const oldElapsed = elapsedRef.current;
+  const reset = useCallback(() => {
+    // 1. Stop running → useEffect cleanup will clear the interval
     setRunning(false);
-    setElapsed(0);
-    elapsedRef.current  = 0;
-    runningRef.current  = false;
-    startTsRef.current  = null;
-    const resetData = { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null };
-    ss(K.TIMER, resetData);
-    set(ref(db, 'users/rahul/stats/timer'), resetData).catch(err => console.error(err));
-    onAdjustRef.current?.(-oldElapsed);
+    runningRef.current = false;
     onRunningChange?.(false);
-  };
+    // 2. Zero the display
+    elapsedRef.current = 0;
+    setElapsed(0);
+    // 3. Persist zero to localStorage + Firebase
+    persistTimer(0, false, null);
+    // 4. Tell App to zero today's dailyStudy so reload doesn't resurrect the old time
+    onReset?.();
+  }, [onRunningChange, persistTimer, onReset]);
+
+  // ── Edit mode ────────────────────────────────────────────────
+  const [editMode, setEditMode] = useState(false);
+  const [editH, setEditH]       = useState('');
+  const [editM, setEditM]       = useState('');
 
   const startEdit = () => {
-    const h = Math.floor(elapsedRef.current / 3600);
-    const m = Math.floor((elapsedRef.current % 3600) / 60);
-    const s = elapsedRef.current % 60;
-    setEditH(h);
-    setEditM(m);
-    setEditS(s);
-    setIsEditing(true);
+    setEditH(String(Math.floor(elapsed / 3600)));
+    setEditM(String(Math.floor((elapsed % 3600) / 60)));
+    setEditMode(true);
   };
-
   const saveEdit = () => {
-    const newElapsed = Math.max(0, editH * 3600 + editM * 60 + editS);
-    const delta = newElapsed - elapsedRef.current;
-    
+    const newElapsed = (parseInt(editH || '0') * 3600) + (parseInt(editM || '0') * 60);
+    const delta      = newElapsed - elapsedRef.current;
     elapsedRef.current = newElapsed;
     setElapsed(newElapsed);
-    
-    if (runningRef.current) {
-      startTsRef.current = Date.now() - newElapsed * 1000;
-    }
-    
-    persistTimer(newElapsed, runningRef.current);
-    onAdjustRef.current?.(delta);
-    setIsEditing(false);
+    onAdjust(Math.round(delta / 60));
+    persistTimer(newElapsed, running, running ? Date.now() - newElapsed * 1000 : null);
+    setEditMode(false);
   };
 
-  if (isEditing) {
+  if (editMode) {
     return (
       <div className="rounded-xl border border-slate-700/60 bg-slate-800/40 p-5 flex flex-col gap-4">
-        <div className="flex items-center gap-2 text-slate-400">
-          <Timer size={15} />
-          <span className="text-xs font-semibold uppercase tracking-widest">Adjust Session Timer</span>
-        </div>
-
-        <div className="flex justify-center items-center gap-2 py-2">
-          <div className="flex flex-col items-center">
+        <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">Adjust Today's Time</p>
+        <div className="flex items-center gap-3 justify-center">
+          <div className="flex flex-col items-center gap-1">
             <input
-              type="number"
-              min="0"
-              max="23"
+              type="number" min="0" max="23"
               value={editH}
-              onChange={e => setEditH(Math.max(0, parseInt(e.target.value) || 0))}
-              className="w-14 bg-slate-900 border border-slate-700 text-slate-200 text-center font-mono text-xl py-1 rounded focus:outline-none focus:border-indigo-500"
+              onChange={e => setEditH(e.target.value)}
+              className="w-20 text-center text-2xl font-bold font-mono bg-slate-900 border border-slate-700 rounded-lg py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
             />
-            <span className="text-[10px] text-slate-500 mt-1 uppercase font-semibold">hr</span>
+            <span className="text-xs text-slate-500">hours</span>
           </div>
-          <span className="text-xl text-slate-600 font-mono">:</span>
-          <div className="flex flex-col items-center">
+          <span className="text-2xl text-slate-500 font-bold pb-4">:</span>
+          <div className="flex flex-col items-center gap-1">
             <input
-              type="number"
-              min="0"
-              max="59"
+              type="number" min="0" max="59"
               value={editM}
-              onChange={e => setEditM(Math.min(59, Math.max(0, parseInt(e.target.value) || 0)))}
-              className="w-14 bg-slate-900 border border-slate-700 text-slate-200 text-center font-mono text-xl py-1 rounded focus:outline-none focus:border-indigo-500"
+              onChange={e => setEditM(e.target.value)}
+              className="w-20 text-center text-2xl font-bold font-mono bg-slate-900 border border-slate-700 rounded-lg py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
             />
-            <span className="text-[10px] text-slate-500 mt-1 uppercase font-semibold">min</span>
-          </div>
-          <span className="text-xl text-slate-600 font-mono">:</span>
-          <div className="flex flex-col items-center">
-            <input
-              type="number"
-              min="0"
-              max="59"
-              value={editS}
-              onChange={e => setEditS(Math.min(59, Math.max(0, parseInt(e.target.value) || 0)))}
-              className="w-14 bg-slate-900 border border-slate-700 text-slate-200 text-center font-mono text-xl py-1 rounded focus:outline-none focus:border-indigo-500"
-            />
-            <span className="text-[10px] text-slate-500 mt-1 uppercase font-semibold">sec</span>
+            <span className="text-xs text-slate-500">minutes</span>
           </div>
         </div>
-
-        <div className="flex gap-2 justify-center">
-          <button
-            onClick={saveEdit}
-            className="px-4 py-1.5 bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 rounded-lg text-xs font-semibold hover:bg-indigo-500/30 transition-all duration-200"
-          >
+        <div className="flex gap-2">
+          <button onClick={saveEdit} className="flex-1 py-2.5 rounded-lg text-sm font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30 transition-all">
             Save
           </button>
-          <button
-            onClick={() => setIsEditing(false)}
-            className="px-4 py-1.5 bg-slate-750/30 text-slate-400 border border-slate-700/40 rounded-lg text-xs font-semibold hover:bg-slate-700/40 transition-all duration-200"
-          >
+          <button onClick={() => setEditMode(false)} className="flex-1 py-2.5 rounded-lg text-sm font-semibold text-slate-400 border border-slate-700/60 hover:bg-slate-700/40 transition-all">
             Cancel
           </button>
         </div>
@@ -412,20 +361,16 @@ function Stopwatch({ onTick, onAdjust, firebaseInitialElapsed, onRunningChange }
         <span className={`ml-auto flex items-center gap-1.5 text-xs font-semibold ${
           running ? 'text-emerald-400' : 'text-slate-600'
         }`}>
-          <span className={`w-1.5 h-1.5 rounded-full ${
-            running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'
-          }`} />
+          <span className={`w-1.5 h-1.5 rounded-full ${running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
           {running ? 'Live' : 'Paused'}
         </span>
       </div>
 
       {/* Clock */}
       <div className="text-center py-2">
-        <span
-          className={`text-5xl font-bold font-mono tracking-widest tabular-nums transition-colors duration-300 ${
-            running ? 'text-indigo-300' : 'text-slate-500'
-          }`}
-        >
+        <span className={`text-5xl font-bold font-mono tracking-widest tabular-nums transition-colors duration-300 ${
+          running ? 'text-indigo-300' : 'text-slate-500'
+        }`}>
           {fmtClock(elapsed)}
         </span>
         <p className="text-xs text-slate-600 mt-1.5 h-4">
@@ -470,26 +415,77 @@ function Stopwatch({ onTick, onAdjust, firebaseInitialElapsed, onRunningChange }
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   COMPONENT: DailyGoalCard — based on course content ticked today
+   COMPONENT: DailyGoalCard (with hidden ⚙ goal editor)
 ═══════════════════════════════════════════════════════════════ */
-function DailyGoalCard({ todayCourseMins, streak }) {
-  const pct       = Math.min((todayCourseMins / DAILY_GOAL_MINS) * 100, 100);
-  const remaining = Math.max(DAILY_GOAL_MINS - todayCourseMins, 0);
-  const met       = todayCourseMins >= DAILY_GOAL_MINS;
-  const over      = todayCourseMins > DAILY_GOAL_MINS ? todayCourseMins - DAILY_GOAL_MINS : 0;
+function DailyGoalCard({ todayCourseMins, streak, goalMins, onGoalChange, accent = 'indigo' }) {
+  const [editing, setEditing] = useState(false);
+  const [editVal, setEditVal] = useState('');
+  const [noGoal,  setNoGoal]  = useState(false);
+
+  const hasGoal   = goalMins > 0;
+  const pct       = hasGoal ? Math.min((todayCourseMins / goalMins) * 100, 100) : 0;
+  const remaining = hasGoal ? Math.max(goalMins - todayCourseMins, 0) : 0;
+  const met       = hasGoal && todayCourseMins >= goalMins;
+  const over      = met ? todayCourseMins - goalMins : 0;
 
   const barBg = met
     ? 'linear-gradient(90deg,#10b981,#34d399)'
     : pct > 75
     ? 'linear-gradient(90deg,#f59e0b,#fbbf24)'
+    : accent === 'violet'
+    ? 'linear-gradient(90deg,#7c3aed,#8b5cf6)'
     : 'linear-gradient(90deg,#6366f1,#a78bfa)';
 
+  const openEdit = () => {
+    setEditVal(hasGoal ? String(Math.round(goalMins / 60)) : '4');
+    setNoGoal(!hasGoal);
+    setEditing(true);
+  };
+  const saveEdit = () => {
+    if (noGoal) {
+      onGoalChange(0);
+    } else {
+      const h = parseInt(editVal || '4', 10);
+      onGoalChange(Math.max(1, h) * 60);
+    }
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 flex flex-col gap-4">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Daily Content Goal</p>
+        <div className="flex items-center gap-3">
+          <input
+            type="number" min="1" max="24"
+            value={editVal}
+            disabled={noGoal}
+            onChange={e => setEditVal(e.target.value)}
+            className="w-20 text-center text-xl font-bold font-mono bg-slate-900 border border-slate-700 rounded-lg py-2 text-slate-100 focus:outline-none focus:border-indigo-500 disabled:opacity-30"
+          />
+          <span className="text-sm text-slate-400">hrs / day</span>
+        </div>
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <div
+            onClick={() => setNoGoal(n => !n)}
+            className={`w-8 h-4 rounded-full transition-colors ${noGoal ? 'bg-indigo-500' : 'bg-slate-700'}`}
+          >
+            <div className={`w-4 h-4 rounded-full bg-white shadow transition-transform ${noGoal ? 'translate-x-4' : 'translate-x-0'}`} />
+          </div>
+          <span className="text-xs text-slate-400">No goal — just study</span>
+        </label>
+        <div className="flex gap-2">
+          <button onClick={saveEdit} className="flex-1 py-2 rounded-lg text-sm font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30 transition-all">Save</button>
+          <button onClick={() => setEditing(false)} className="flex-1 py-2 rounded-lg text-sm font-semibold text-slate-400 border border-slate-700/60 hover:bg-slate-700/40 transition-all">Cancel</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div
-      className={`rounded-xl border p-4 flex flex-col gap-3 transition-colors duration-500 ${
-        met ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-slate-700/50 bg-slate-800/30'
-      }`}
-    >
+    <div className={`rounded-xl border p-4 flex flex-col gap-3 transition-colors duration-500 ${
+      met ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-slate-700/50 bg-slate-800/30'
+    }`}>
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -504,58 +500,77 @@ function DailyGoalCard({ todayCourseMins, streak }) {
               <Flame size={11} /> {streak}d
             </span>
           )}
-          <span className="text-[10px] font-semibold text-slate-600 font-mono">/ 4h goal</span>
+          {hasGoal && (
+            <span className="text-[10px] font-semibold text-slate-600 font-mono">/ {fmtMins(goalMins)}</span>
+          )}
+          <button
+            onClick={openEdit}
+            className="text-slate-700 hover:text-slate-400 transition-colors"
+            title="Customise goal"
+          >
+            <Settings size={12} />
+          </button>
         </div>
       </div>
 
-      {/* Progress numbers — clean single row */}
-      <div className="flex items-end justify-between">
-        <div>
-          <p className={`text-2xl font-bold font-mono leading-none ${
-            met ? 'text-emerald-300' : todayCourseMins > 0 ? 'text-slate-200' : 'text-slate-600'
-          }`}>
+      {/* No-goal mode */}
+      {!hasGoal ? (
+        <div className="flex flex-col gap-1">
+          <p className={`text-2xl font-bold font-mono leading-none ${todayCourseMins > 0 ? 'text-slate-200' : 'text-slate-600'}`}>
             {fmtMins(todayCourseMins) || '0m'}
           </p>
-          <p className="text-[10px] text-slate-600 mt-1">watched today</p>
+          <p className="text-[10px] text-slate-600">watched today · no goal set</p>
+          {todayCourseMins === 0 && (
+            <p className="text-xs text-slate-600 mt-1">Tick off lectures below to track today's content</p>
+          )}
         </div>
-        <div className="text-right">
-          <p className={`text-sm font-bold font-mono leading-none ${
-            met ? 'text-emerald-400' : 'text-slate-500'
-          }`}>
-            {met ? '+' + (over > 0 ? fmtMins(over) : '0m') : fmtMins(remaining)}
+      ) : (
+        <>
+          {/* Progress numbers — clean two-column */}
+          <div className="flex items-end justify-between">
+            <div>
+              <p className={`text-2xl font-bold font-mono leading-none ${
+                met ? 'text-emerald-300' : todayCourseMins > 0 ? 'text-slate-200' : 'text-slate-600'
+              }`}>
+                {fmtMins(todayCourseMins) || '0m'}
+              </p>
+              <p className="text-[10px] text-slate-600 mt-1">watched today</p>
+            </div>
+            <div className="text-right">
+              <p className={`text-sm font-bold font-mono leading-none ${met ? 'text-emerald-400' : 'text-slate-500'}`}>
+                {met ? `+${fmtMins(over) || '0m'}` : fmtMins(remaining)}
+              </p>
+              <p className="text-[10px] text-slate-600 mt-1">{met ? 'over goal' : 'remaining'}</p>
+            </div>
+          </div>
+
+          {/* Bar */}
+          <div>
+            <div className="h-2 bg-slate-800/80 rounded-full overflow-hidden">
+              <div className="h-full rounded-full transition-all duration-700 ease-out" style={{ width: `${pct}%`, background: barBg }} />
+            </div>
+            <div className="flex justify-between mt-1.5">
+              <span className={`text-[10px] font-semibold font-mono ${met ? 'text-emerald-500' : 'text-slate-600'}`}>
+                {pct.toFixed(0)}% complete
+              </span>
+              <span className="text-[10px] text-slate-700 font-mono">{fmtMins(goalMins)}</span>
+            </div>
+          </div>
+
+          {/* Status text */}
+          <p className="text-xs">
+            {met ? (
+              <span className="text-emerald-400 font-semibold">🎯 Daily goal hit!{over > 0 ? ` +${fmtMins(over)} bonus` : ''}</span>
+            ) : todayCourseMins === 0 ? (
+              <span className="text-slate-600">Tick off lectures below to track today's content</span>
+            ) : (
+              <span className="text-slate-400">
+                <span className="text-slate-200 font-semibold">{fmtMins(remaining)}</span> of content left to hit goal
+              </span>
+            )}
           </p>
-          <p className="text-[10px] text-slate-600 mt-1">{met ? 'over goal' : 'remaining'}</p>
-        </div>
-      </div>
-
-      {/* Bar */}
-      <div>
-        <div className="h-2 bg-slate-800/80 rounded-full overflow-hidden">
-          <div
-            className="h-full rounded-full transition-all duration-700 ease-out"
-            style={{ width: `${pct}%`, background: barBg }}
-          />
-        </div>
-        <div className="flex justify-between mt-1.5">
-          <span className={`text-[10px] font-semibold font-mono ${
-            met ? 'text-emerald-500' : 'text-slate-600'
-          }`}>{pct.toFixed(0)}% complete</span>
-          <span className="text-[10px] text-slate-700 font-mono">240m</span>
-        </div>
-      </div>
-
-      {/* Status text */}
-      <p className="text-xs">
-        {met ? (
-          <span className="text-emerald-400 font-semibold">🎯 Daily goal hit!{over > 0 ? ` +${fmtMins(over)} bonus` : ''}</span>
-        ) : todayCourseMins === 0 ? (
-          <span className="text-slate-600">Tick off lectures below to track today's content</span>
-        ) : (
-          <span className="text-slate-400">
-            <span className="text-slate-200 font-semibold">{fmtMins(remaining)}</span> of content left to hit goal
-          </span>
-        )}
-      </p>
+        </>
+      )}
     </div>
   );
 }
@@ -578,11 +593,9 @@ function LectureRow({ lecture, isCompleted, completedDate, onToggle }) {
           : <Circle size={15} className="text-slate-600 group-hover:text-slate-400 transition-colors" />
         }
       </span>
-      <span
-        className={`flex-1 text-sm leading-snug transition-all ${
-          isCompleted ? 'line-through text-slate-600' : 'text-slate-300 group-hover:text-slate-100'
-        }`}
-      >
+      <span className={`flex-1 text-sm leading-snug transition-all ${
+        isCompleted ? 'line-through text-slate-600' : 'text-slate-300 group-hover:text-slate-100'
+      }`}>
         {lecture.title}
       </span>
       <div className="flex items-center gap-2 flex-shrink-0">
@@ -600,7 +613,7 @@ function LectureRow({ lecture, isCompleted, completedDate, onToggle }) {
 /* ═══════════════════════════════════════════════════════════════
    COMPONENT: SectionAccordion
 ═══════════════════════════════════════════════════════════════ */
-const ACCENTS = [
+const SECTION_ACCENTS = [
   { border: 'border-l-indigo-500',  badge: 'bg-indigo-500/15 text-indigo-300'   },
   { border: 'border-l-violet-500',  badge: 'bg-violet-500/15 text-violet-300'   },
   { border: 'border-l-cyan-500',    badge: 'bg-cyan-500/15 text-cyan-300'       },
@@ -620,12 +633,10 @@ function SectionAccordion({ sectionData, completedIds, lectureDates, onToggle, s
   const completedMins     = completedLectures.reduce((s, l) => s + l.duration, 0);
   const pct               = lectures.length > 0 ? (completedCount / lectures.length) * 100 : 0;
   const allDone           = completedCount === lectures.length;
-  const a                 = ACCENTS[sectionIndex % ACCENTS.length];
+  const a                 = SECTION_ACCENTS[sectionIndex % SECTION_ACCENTS.length];
 
   return (
-    <div
-      className={`rounded-xl border border-slate-700/50 bg-slate-800/30 overflow-hidden border-l-2 ${a.border} hover:border-slate-700/70 transition-colors`}
-    >
+    <div className={`rounded-xl border border-slate-700/50 bg-slate-800/30 overflow-hidden border-l-2 ${a.border} hover:border-slate-700/70 transition-colors`}>
       <button
         id={`section-${sectionIndex}`}
         onClick={() => setOpen(o => !o)}
@@ -672,10 +683,9 @@ function SectionAccordion({ sectionData, completedIds, lectureDates, onToggle, s
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   COMPONENT: StudyHistory
-   Shows both session timer hours AND course content per day.
+   COMPONENT: StudyHistory — multi-subject aware
 ═══════════════════════════════════════════════════════════════ */
-function StudyHistory({ mergedHistory }) {
+function StudyHistory({ mergedHistory, subjectSettings }) {
   const [expanded, setExpanded] = useState(true);
 
   const days = useMemo(
@@ -683,79 +693,54 @@ function StudyHistory({ mergedHistory }) {
     [mergedHistory]
   );
 
+  const totalGoalMins = useMemo(() => {
+    return SUBJECT_LIST.reduce((sum, s) => {
+      const g = subjectSettings[s.id]?.dailyGoalMins;
+      return sum + (g !== undefined ? g : s.defaultDailyGoalMins);
+    }, 0);
+  }, [subjectSettings]);
+
   const statsSummary = useMemo(() => {
     const entries = Object.entries(mergedHistory);
     if (entries.length === 0) return null;
 
-    let totalSecs = 0;
-    let totalMins = 0;
-    let goalsMetCount = 0;
-    let maxMins = 0;
-    let maxMinsDate = '';
-
-    const oneWeekAgo = new Date();
-    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-    const oneWeekAgoStr = `${oneWeekAgo.getFullYear()}-${String(oneWeekAgo.getMonth() + 1).padStart(2, '0')}-${String(oneWeekAgo.getDate()).padStart(2, '0')}`;
-    
-    let weeklySecs = 0;
-    let weeklyMins = 0;
+    let totalSecs = 0, totalContentMins = 0, goalsMetCount = 0, maxMins = 0, maxDate = '';
+    const oneWeekAgoStr = (() => {
+      const d = new Date(); d.setDate(d.getDate() - 7);
+      return d.toLocaleDateString('en-CA');
+    })();
+    let weeklySecs = 0, weeklyMins = 0;
 
     entries.forEach(([date, data]) => {
-      const mins = data.courseMinutesWatched || 0;
-      const secs = data.studiedSeconds || 0;
-      totalSecs += secs;
-      totalMins += mins;
-      if (mins >= DAILY_GOAL_MINS) {
-        goalsMetCount++;
-      }
-      if (mins > maxMins) {
-        maxMins = mins;
-        maxMinsDate = date;
-      }
-      if (date >= oneWeekAgoStr) {
-        weeklySecs += secs;
-        weeklyMins += mins;
-      }
+      const secs  = data.studiedSeconds || 0;
+      const mins  = Object.values(data.subjects || {}).reduce((s, sd) => s + (sd.courseMinutesWatched || 0), 0);
+      totalSecs  += secs;
+      totalContentMins += mins;
+      if (mins >= totalGoalMins && totalGoalMins > 0) goalsMetCount++;
+      if (mins > maxMins) { maxMins = mins; maxDate = date; }
+      if (date >= oneWeekAgoStr) { weeklySecs += secs; weeklyMins += mins; }
     });
 
-    const successRate = entries.length > 0 ? (goalsMetCount / entries.length) * 100 : 0;
-
     return {
-      totalSecs,
-      totalMins,
-      goalsMetCount,
-      successRate,
-      maxMins,
-      maxMinsDate,
-      weeklySecs,
-      weeklyMins,
-      activeDays: entries.length
+      totalSecs, totalContentMins, goalsMetCount,
+      successRate: entries.length > 0 ? (goalsMetCount / entries.length) * 100 : 0,
+      maxMins, maxDate, weeklySecs, weeklyMins, activeDays: entries.length,
     };
-  }, [mergedHistory]);
+  }, [mergedHistory, totalGoalMins]);
 
   if (days.length === 0) {
     return (
       <section id="study-history" className="rounded-xl border border-slate-800 bg-slate-900/20 p-6 text-center">
         <BarChart3 size={28} className="text-slate-600 mx-auto mb-2" />
-        <h3 className="text-sm font-semibold text-slate-300 uppercase tracking-widest text-slate-400">Study History</h3>
+        <h3 className="text-sm font-semibold uppercase tracking-widest text-slate-400">Study History</h3>
         <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-          No study history recorded yet. Start the timer or complete a lecture to see your daily stats here!
+          No study history yet. Start the timer or tick off a lecture to see daily stats here.
         </p>
       </section>
     );
   }
 
-  const summary = statsSummary || {
-    totalSecs: 0,
-    totalMins: 0,
-    goalsMetCount: 0,
-    successRate: 0,
-    maxMins: 0,
-    maxMinsDate: '',
-    weeklySecs: 0,
-    weeklyMins: 0,
-    activeDays: 0
-  };
+  const summary = statsSummary;
 
   return (
     <section id="study-history">
@@ -765,148 +750,124 @@ function StudyHistory({ mergedHistory }) {
         <div className="flex-1 h-px bg-slate-800 ml-2" />
         <div className="flex items-center gap-3 mr-2">
           <span className="text-xs text-slate-500 font-mono hidden sm:block">
-            {fmtMins(summary.totalMins)} content · {fmtSecs(summary.totalSecs)} timer · {summary.goalsMetCount}/{days.length} goals
+            {fmtSecs(summary.totalSecs)} timer · {summary.goalsMetCount}/{days.length} goals
           </span>
           <Calendar size={13} className="text-slate-600" />
           <span className="text-xs text-slate-600 font-mono">{days.length}d</span>
         </div>
-        {expanded
-          ? <ChevronUp size={14} className="text-slate-500" />
-          : <ChevronDown size={14} className="text-slate-500" />
-        }
+        {expanded ? <ChevronUp size={14} className="text-slate-500" /> : <ChevronDown size={14} className="text-slate-500" />}
       </button>
 
       {expanded && (
         <div className="space-y-4">
-          {/* Dashboard-style Summary Stats */}
+          {/* Summary stats */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 flex flex-col justify-between">
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Goal Success Rate</span>
-              <div className="flex items-baseline gap-1.5 mt-2">
-                <span className="text-lg font-bold font-mono text-emerald-400">{summary.successRate.toFixed(0)}%</span>
-                <span className="text-[10px] text-slate-500">{summary.goalsMetCount} / {summary.activeDays} days</span>
+            {[
+              { label: 'Goal Success Rate', value: `${summary.successRate.toFixed(0)}%`, sub: `${summary.goalsMetCount} / ${summary.activeDays} days`, color: 'text-emerald-400' },
+              { label: 'Last 7 Days',        value: fmtSecs(summary.weeklySecs),          sub: `${fmtMins(summary.weeklyMins)} content`,              color: 'text-indigo-300'  },
+              { label: 'All-Time Focus',     value: `${Math.round(summary.totalSecs / 3600)}h`, sub: 'total studied',                                  color: 'text-sky-400'     },
+              { label: 'Personal Best',      value: summary.maxMins > 0 ? fmtMins(summary.maxMins) : '—', sub: summary.maxDate ? dateLabel(summary.maxDate) : '', color: 'text-amber-400' },
+            ].map(item => (
+              <div key={item.label} className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 flex flex-col justify-between">
+                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">{item.label}</span>
+                <div className="mt-2">
+                  <span className={`text-lg font-bold font-mono ${item.color}`}>{item.value}</span>
+                  <p className="text-[10px] text-slate-500 mt-0.5">{item.sub}</p>
+                </div>
               </div>
-            </div>
-
-            <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 flex flex-col justify-between">
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Last 7 Days</span>
-              <div className="flex flex-col mt-2">
-                <span className="text-sm font-bold font-mono text-indigo-300">{fmtSecs(summary.weeklySecs)} timer</span>
-                <span className="text-[10px] text-slate-400 mt-0.5">{fmtMins(summary.weeklyMins)} content</span>
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 flex flex-col justify-between">
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">All-Time Focus</span>
-              <div className="flex items-baseline gap-1 mt-2">
-                <span className="text-lg font-bold font-mono text-sky-400">{Math.round(summary.totalSecs / 3600)} hrs</span>
-                <span className="text-[10px] text-slate-500">total studied</span>
-              </div>
-            </div>
-
-            <div className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 flex flex-col justify-between">
-              <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Personal Best</span>
-              <div className="flex flex-col mt-2">
-                <span className="text-sm font-bold font-mono text-amber-400">{summary.maxMins > 0 ? fmtMins(summary.maxMins) : '—'}</span>
-                <span className="text-[10px] text-slate-500 mt-0.5 truncate">{summary.maxMinsDate ? dateLabel(summary.maxMinsDate) : ''}</span>
-              </div>
-            </div>
+            ))}
           </div>
 
-          {/* Daily Records List */}
+          {/* Daily records */}
           <div className="space-y-2">
             {days.map(([date, rec]) => {
-              const mins          = rec.courseMinutesWatched ?? 0;
-              const studiedSecs   = rec.studiedSeconds ?? 0;
-              const met           = mins >= DAILY_GOAL_MINS;
-              const goalPct       = Math.min((mins / DAILY_GOAL_MINS) * 100, 100);
-              const isToday       = date === todayISO();
+              const studiedSecs     = rec.studiedSeconds ?? 0;
+              const subjectEntries  = Object.entries(rec.subjects || {}).filter(([, sd]) => sd.courseMinutesWatched > 0 || sd.lecturesCompleted > 0);
+              const totalContentMin = subjectEntries.reduce((s, [, sd]) => s + (sd.courseMinutesWatched || 0), 0);
+              const met             = totalGoalMins > 0 && totalContentMin >= totalGoalMins;
+              const goalPct         = totalGoalMins > 0 ? Math.min((totalContentMin / totalGoalMins) * 100, 100) : 0;
+              const isToday         = date === todayISO();
 
               return (
                 <div
                   key={date}
                   className={`rounded-xl border p-4 transition-colors ${
-                    isToday
-                      ? 'border-indigo-500/30 bg-indigo-500/5'
-                      : met
-                      ? 'border-emerald-500/20 bg-emerald-500/5'
-                      : 'border-slate-700/40 bg-slate-800/20'
+                    isToday ? 'border-indigo-500/30 bg-indigo-500/5'
+                    : met   ? 'border-emerald-500/20 bg-emerald-500/5'
+                            : 'border-slate-700/40 bg-slate-800/20'
                   }`}
                 >
+                  {/* Top row: date + timer + goal badge */}
                   <div className="flex items-start gap-3 sm:gap-4">
-                    {/* Date */}
                     <div className="flex-shrink-0 w-24 sm:w-28">
-                      <p className={`text-sm font-bold ${isToday ? 'text-indigo-300' : 'text-slate-200'}`}>
-                        {dateLabel(date)}
-                      </p>
+                      <p className={`text-sm font-bold ${isToday ? 'text-indigo-300' : 'text-slate-200'}`}>{dateLabel(date)}</p>
                       <p className="text-xs text-slate-500 mt-0.5 leading-snug">{fullDateLabel(date)}</p>
                     </div>
 
-                    {/* Stats grid — 4 cols */}
-                    <div className="flex-1 grid grid-cols-2 sm:grid-cols-4 gap-3">
-                      {/* Session timer */}
-                      <div>
-                        <p className={`text-sm font-bold font-mono ${studiedSecs > 0 ? 'text-sky-300' : 'text-slate-600'}`}>
+                    <div className="flex-1 flex flex-col gap-1.5">
+                      {/* Global timer */}
+                      <div className="flex items-center gap-2">
+                        <Clock size={11} className="text-sky-500 flex-shrink-0" />
+                        <span className={`text-sm font-bold font-mono ${studiedSecs > 0 ? 'text-sky-300' : 'text-slate-600'}`}>
                           {studiedSecs > 0 ? fmtSecs(studiedSecs) : '—'}
-                        </p>
-                        <p className="text-xs text-slate-500">timer</p>
+                        </span>
+                        <span className="text-xs text-slate-500">total study time</span>
                       </div>
-                      {/* Content watched */}
-                      <div>
-                        <p className={`text-sm font-bold font-mono ${met ? 'text-emerald-300' : mins > 0 ? 'text-slate-300' : 'text-slate-600'}`}>
-                          {mins > 0 ? fmtMins(mins) : '—'}
-                        </p>
-                        <p className="text-xs text-slate-500">content</p>
-                      </div>
-                      {/* Lectures */}
-                      <div>
-                        <p className={`text-sm font-bold font-mono ${(rec.lecturesCompleted ?? 0) > 0 ? 'text-violet-300' : 'text-slate-600'}`}>
-                          {rec.lecturesCompleted ?? 0}
-                        </p>
-                        <p className="text-xs text-slate-500">lectures</p>
-                      </div>
-                      {/* Cumulative % */}
-                      <div>
-                        <p className="text-sm font-bold font-mono text-indigo-300">
-                          {(rec.completionPct ?? 0).toFixed(1)}%
-                        </p>
-                        <p className="text-xs text-slate-500">cumul.</p>
-                      </div>
+
+                      {/* Per-subject rows */}
+                      {subjectEntries.length === 0 ? (
+                        <p className="text-xs text-slate-600">No lectures ticked this day</p>
+                      ) : (
+                        subjectEntries.map(([subId, sd]) => {
+                          const subj = SUBJECTS[subId];
+                          if (!subj) return null;
+                          const subAccent = ACCENT[subj.accent] || ACCENT.indigo;
+                          return (
+                            <div key={subId} className="flex items-center gap-2">
+                              <span className="text-sm flex-shrink-0">{subj.icon}</span>
+                              <span className={`text-xs font-semibold ${subAccent.text}`}>{subj.shortName}</span>
+                              <span className="text-xs text-slate-400 font-mono">
+                                {sd.studiedSeconds > 0 ? fmtSecs(sd.studiedSeconds) + ' · ' : ''}
+                                {sd.courseMinutesWatched > 0 ? fmtMins(sd.courseMinutesWatched) + ' content · ' : ''}
+                                {sd.lecturesCompleted} lec
+                              </span>
+                            </div>
+                          );
+                        })
+                      )}
                     </div>
 
                     {/* Goal badge */}
-                    <div className="flex-shrink-0 text-center">
-                      <div
-                        className={`w-8 h-8 rounded-full flex items-center justify-center mx-auto ${
-                          met ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700/40 text-slate-600'
-                        }`}
-                      >
-                        {met ? <CheckCircle2 size={16} /> : <Circle size={16} />}
+                    {totalGoalMins > 0 && (
+                      <div className="flex-shrink-0 text-center">
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center mx-auto ${met ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700/40 text-slate-600'}`}>
+                          {met ? <CheckCircle2 size={16} /> : <Circle size={16} />}
+                        </div>
+                        <p className={`text-xs mt-0.5 font-medium ${met ? 'text-emerald-500' : 'text-slate-600'}`}>
+                          {met ? 'Met' : 'Missed'}
+                        </p>
                       </div>
-                      <p className={`text-xs mt-0.5 font-medium ${met ? 'text-emerald-500' : 'text-slate-600'}`}>
-                        {met ? 'Met' : 'Missed'}
-                      </p>
-                    </div>
+                    )}
                   </div>
 
-                  {/* Goal bar */}
-                  <div className="mt-3">
-                    <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                      <div
-                        className="h-full rounded-full"
-                        style={{
-                          width: `${goalPct}%`,
-                          background: met
-                            ? 'linear-gradient(90deg,#10b981,#34d399)'
-                            : 'linear-gradient(90deg,#6366f1,#a78bfa)',
-                        }}
-                      />
+                  {/* Combined goal bar (only when goal is set and there's content) */}
+                  {totalGoalMins > 0 && totalContentMin > 0 && (
+                    <div className="mt-3">
+                      <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full"
+                          style={{
+                            width: `${goalPct}%`,
+                            background: met ? 'linear-gradient(90deg,#10b981,#34d399)' : 'linear-gradient(90deg,#6366f1,#a78bfa)',
+                          }}
+                        />
+                      </div>
+                      <div className="flex justify-between mt-0.5">
+                        <span className="text-[10px] text-slate-700 font-mono">{fmtMins(totalContentMin)} content</span>
+                        <span className="text-[10px] text-slate-700 font-mono">{fmtMins(totalGoalMins)} goal</span>
+                      </div>
                     </div>
-                    <div className="flex justify-between mt-0.5">
-                      <span className="text-xs text-slate-700 font-mono">0m content</span>
-                      <span className="text-xs text-slate-700 font-mono">240m goal</span>
-                    </div>
-                  </div>
+                  )}
                 </div>
               );
             })}
@@ -921,257 +882,409 @@ function StudyHistory({ mergedHistory }) {
    APP ROOT
 ═══════════════════════════════════════════════════════════════ */
 export default function App() {
-  // ── Persistent state ─────────────────────────────────────────
-  const [firebaseLoaded, setFirebaseLoaded] = useState(false);
-  const [completedIds, setCompletedIds] = useState(() => new Set());
-  const [lectureDates, setLectureDates] = useState({});
-  const [dailyStudy,   setDailyStudy]   = useState({});
+  // ── Active subject ────────────────────────────────────────────
+  const [activeSubjectId, setActiveSubjectId] = useState(
+    () => localStorage.getItem(K.ACTIVE_SUBJECT) || 'algorithms'
+  );
+  const activeSubject  = SUBJECTS[activeSubjectId] || SUBJECTS.algorithms;
+  const lectureList    = activeSubject.lectures;
+  const TOTAL_MINS     = useMemo(() => lectureList.reduce((s, l) => s + l.duration, 0), [activeSubjectId]);
+  const SECTIONS       = useMemo(() => groupBySection(lectureList), [activeSubjectId]);
+  const LECTURE_MAP    = useMemo(() => Object.fromEntries(lectureList.map(l => [l.id, l])), [activeSubjectId]);
 
-  // Refs: latest values for use in callbacks without stale closures
+  // ── Subject goal settings ─────────────────────────────────────
+  const [subjectSettings, setSubjectSettings] = useState(() => ls(K.SUBJECT_SETTINGS, {}));
+  const goalMins = useMemo(() => {
+    const s = subjectSettings[activeSubjectId];
+    return s !== undefined ? s.dailyGoalMins : activeSubject.defaultDailyGoalMins;
+  }, [subjectSettings, activeSubjectId]);
+
+  const handleGoalChange = useCallback((newGoalMins) => {
+    const next = { ...subjectSettings, [activeSubjectId]: { dailyGoalMins: newGoalMins } };
+    setSubjectSettings(next);
+    ss(K.SUBJECT_SETTINGS, next);
+    set(ref(db, 'users/rahul/global/settings/subjects'), next).catch(console.error);
+  }, [subjectSettings, activeSubjectId]);
+
+  // ── Per-subject state: { [subjectId]: { completedIds, lectureDates } } ──
+  const [allSubjectsData, setAllSubjectsData] = useState({});
+  const allSubjectsDataRef = useRef({});
+  useEffect(() => { allSubjectsDataRef.current = allSubjectsData; }, [allSubjectsData]);
+
+  // Convenience accessors for the active subject
+  const completedIds = useMemo(() => allSubjectsData[activeSubjectId]?.completedIds ?? new Set(), [allSubjectsData, activeSubjectId]);
+  const lectureDates = useMemo(() => allSubjectsData[activeSubjectId]?.lectureDates ?? {}, [allSubjectsData, activeSubjectId]);
   const completedIdsRef = useRef(completedIds);
   const lectureDatesRef = useRef(lectureDates);
-  const dailyStudyRef   = useRef(dailyStudy);
   useEffect(() => { completedIdsRef.current = completedIds; }, [completedIds]);
   useEffect(() => { lectureDatesRef.current = lectureDates; }, [lectureDates]);
-  useEffect(() => { dailyStudyRef.current   = dailyStudy;   }, [dailyStudy]);
 
-  // ── Derived: course analytics ─────────────────────────────────
+  // ── Global timer + daily study ────────────────────────────────
+  const [firebaseLoaded, setFirebaseLoaded] = useState(false);
+  const [dailyStudy,     setDailyStudy]     = useState({});
+  const dailyStudyRef = useRef(dailyStudy);
+  useEffect(() => { dailyStudyRef.current = dailyStudy; }, [dailyStudy]);
+
+  // ── Per-subject timer tracking ────────────────────────────────
+  // subjectDailyStudy: { "YYYY-MM-DD": { algorithms: secs, toc: secs } }
+  const [subjectDailyStudy, setSubjectDailyStudy] = useState(() => ls(K.SUBJECT_DAILY_STUDY, {}));
+  const subjectDailyStudyRef = useRef(subjectDailyStudy);
+  useEffect(() => { subjectDailyStudyRef.current = subjectDailyStudy; }, [subjectDailyStudy]);
+  // Records the value of dailyStudy[today] at the moment of the last subject switch
+  const subjectSwitchBaseRef = useRef(null);
+
+  // ── Derived analytics for active subject ─────────────────────
   const completedMins = useMemo(
-    () => COURSE_DATA.filter(l => completedIds.has(l.id)).reduce((s, l) => s + l.duration, 0),
-    [completedIds]
+    () => lectureList.filter(l => completedIds.has(l.id)).reduce((s, l) => s + l.duration, 0),
+    [completedIds, lectureList]
   );
   const remainingMins = TOTAL_MINS - completedMins;
   const coursePct     = TOTAL_MINS > 0 ? (completedMins / TOTAL_MINS) * 100 : 0;
 
-  // ── Derived: today's course minutes (for DailyGoalCard) ───────
   const todayCourseMins = useMemo(() => {
     const today = todayISO();
-    return COURSE_DATA
+    return lectureList
       .filter(l => completedIds.has(l.id) && lectureDates[l.id] === today)
       .reduce((s, l) => s + l.duration, 0);
-  }, [completedIds, lectureDates]);
+  }, [completedIds, lectureDates, lectureList]);
 
-  // ── Derived: course history by day (from lectureDates) ────────
-  const courseHistoryByDay = useMemo(() => {
-    const map = {};
-    Object.entries(lectureDates).forEach(([idStr, date]) => {
-      const lecture = LECTURE_MAP[Number(idStr)];
-      if (!lecture) return;
-      if (!map[date]) map[date] = { lecturesCompleted: 0, courseMinutesWatched: 0, completionPct: 0 };
-      map[date].lecturesCompleted++;
-      map[date].courseMinutesWatched += lecture.duration;
-    });
-    // Cumulative completion % in chronological order
-    let cumulative = 0;
-    Object.keys(map).sort().forEach(day => {
-      cumulative += map[day].lecturesCompleted;
-      map[day].completionPct = (cumulative / COURSE_DATA.length) * 100;
-    });
-    return map;
-  }, [lectureDates]);
-
-  // ── Derived: merged history (course + timer per day) ──────────
+  // ── Merged history (multi-subject aware) ─────────────────────
   const mergedHistory = useMemo(() => {
     const result = {};
-    Object.entries(courseHistoryByDay).forEach(([date, data]) => {
-      result[date] = { ...data };
-    });
-    Object.entries(dailyStudy).forEach(([date, seconds]) => {
-      if (!result[date]) result[date] = { lecturesCompleted: 0, courseMinutesWatched: 0, completionPct: 0 };
-      result[date].studiedSeconds = seconds;
-    });
-    return result;
-  }, [courseHistoryByDay, dailyStudy]);
 
-  // ── Derived: streak ──────────────────────────────────────────
+    // Aggregate lecture data per day per subject
+    SUBJECT_LIST.forEach(subj => {
+      const subjData = allSubjectsData[subj.id];
+      if (!subjData) return;
+      const ld = subjData.lectureDates || {};
+      const lm = Object.fromEntries(subj.lectures.map(l => [l.id, l]));
+      Object.entries(ld).forEach(([idStr, date]) => {
+        const lecture = lm[Number(idStr)];
+        if (!lecture) return;
+        if (!result[date]) result[date] = { studiedSeconds: 0, subjects: {} };
+        if (!result[date].subjects[subj.id]) {
+          result[date].subjects[subj.id] = { lecturesCompleted: 0, courseMinutesWatched: 0, studiedSeconds: 0 };
+        }
+        result[date].subjects[subj.id].lecturesCompleted++;
+        result[date].subjects[subj.id].courseMinutesWatched += lecture.duration;
+      });
+    });
+
+    // Add global timer seconds per day
+    Object.entries(dailyStudy).forEach(([date, secs]) => {
+      if (!result[date]) result[date] = { studiedSeconds: 0, subjects: {} };
+      result[date].studiedSeconds = secs;
+    });
+
+    // Add per-subject timer seconds per day
+    Object.entries(subjectDailyStudy).forEach(([date, subjSecs]) => {
+      if (!result[date]) result[date] = { studiedSeconds: 0, subjects: {} };
+      Object.entries(subjSecs).forEach(([subId, secs]) => {
+        if (!result[date].subjects[subId]) {
+          result[date].subjects[subId] = { lecturesCompleted: 0, courseMinutesWatched: 0, studiedSeconds: 0 };
+        }
+        result[date].subjects[subId].studiedSeconds = secs;
+      });
+    });
+
+    return result;
+  }, [allSubjectsData, dailyStudy, subjectDailyStudy]);
+
+  // ── Streak (based on active subject's goal) ───────────────────
   const streak = useMemo(() => {
+    if (goalMins <= 0) return 0;
     let s = 0;
     const d = new Date();
     while (true) {
       const ds   = d.toLocaleDateString('en-CA');
-      const mins = ds === todayISO()
-        ? todayCourseMins
-        : (courseHistoryByDay[ds]?.courseMinutesWatched ?? 0);
-      if (mins < DAILY_GOAL_MINS) break;
+      const subj = mergedHistory[ds]?.subjects?.[activeSubjectId];
+      const mins = subj?.courseMinutesWatched ?? 0;
+      if (mins < goalMins) break;
       s++;
       d.setDate(d.getDate() - 1);
     }
     return s;
-  }, [courseHistoryByDay, todayCourseMins]);
+  }, [mergedHistory, activeSubjectId, goalMins]);
 
-  // ── Fetch Initial Stats from Firebase ─────────────────────────
+  // ── Firebase load + migration ─────────────────────────────────
   useEffect(() => {
-    const statsRef = ref(db, 'users/rahul/stats');
-    get(statsRef)
-      .then((snapshot) => {
-        const isBackupImported = localStorage.getItem('cst_backup_imported') === 'true';
-        const localTimer = ls(K.TIMER, {});
+    const globalRef  = ref(db, 'users/rahul/global');
+    const oldStatsRef = ref(db, 'users/rahul/stats');
 
-        let stats = snapshot.val();
-        let useLocalCache = isBackupImported;
+    get(globalRef).then(async (globalSnap) => {
+      // ── ONE-TIME MIGRATION from v4 (stats/) to v5 (global/ + subjects/) ──
+      if (!globalSnap.exists() || !globalSnap.val()?.migrated) {
+        const oldSnap = await get(oldStatsRef);
+        const old     = oldSnap.exists() ? oldSnap.val() : {};
 
-        // Conflict Resolution: If localStorage has a newer save than Firebase,
-        // use local cache to avoid overwriting recent unsaved changes (e.g. on closed tabs)
-        if (snapshot.exists() && !isBackupImported) {
-          const firebaseTimer = stats.timer || { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: 0 };
-          if (localTimer.lastSavedTs && firebaseTimer.lastSavedTs && localTimer.lastSavedTs > firebaseTimer.lastSavedTs) {
-            useLocalCache = true;
-          }
+        // Build migrated data
+        const migratedCompleted    = old.completed    || [];
+        const migratedLectureDates = old.lectureDates || {};
+        const migratedDailyStudy   = old.dailyStudy   || {};
+        const migratedTimer        = old.timer        || {};
+        const migratedSettings     = ls(K.SUBJECT_SETTINGS, {});
+
+        // Seed subjectDailyStudy: credit all old time to algorithms
+        const migratedSubjectDs = {};
+        Object.entries(migratedDailyStudy).forEach(([date, secs]) => {
+          migratedSubjectDs[date] = { algorithms: secs };
+        });
+
+        // Write to new paths
+        await set(ref(db, 'users/rahul/global/dailyStudy'),         migratedDailyStudy);
+        await set(ref(db, 'users/rahul/global/timer'),               migratedTimer);
+        await set(ref(db, 'users/rahul/global/subjectDailyStudy'),   migratedSubjectDs);
+        await set(ref(db, 'users/rahul/global/settings/subjects'),   migratedSettings);
+        await set(ref(db, 'users/rahul/global/migrated'),            true);
+        await set(ref(db, 'users/rahul/subjects/algorithms/completed'),    migratedCompleted);
+        await set(ref(db, 'users/rahul/subjects/algorithms/lectureDates'), migratedLectureDates);
+
+        // Init all other subjects with empty data
+        for (const subj of SUBJECT_LIST) {
+          if (subj.id === 'algorithms') continue;
+          await set(ref(db, `users/rahul/subjects/${subj.id}/completed`),    []);
+          await set(ref(db, `users/rahul/subjects/${subj.id}/lectureDates`), {});
         }
 
-        if (snapshot.exists() && !useLocalCache) {
-          const savedCompleted = stats.completed || [];
-          const savedLectureDates = stats.lectureDates || {};
-          const savedDailyStudy = stats.dailyStudy || {};
-          const savedTimer = stats.timer || { sessionElapsed: 0, sessionStartTs: null, lastSavedTs: null };
+        // Update localStorage keys
+        ss(K.DAILY_STUDY,         migratedDailyStudy);
+        ss(K.TIMER,               migratedTimer);
+        ss(K.SUBJECT_DAILY_STUDY, migratedSubjectDs);
+        ss(K.SUBJECT_SETTINGS,    migratedSettings);
+        ss(K.completed('algorithms'),    migratedCompleted);
+        ss(K.lectureDates('algorithms'), migratedLectureDates);
 
-          let calculatedDailyStudy = { ...savedDailyStudy };
-          let calculatedTimer = { ...savedTimer };
-          if (savedTimer.sessionStartTs && savedTimer.lastSavedTs) {
-            const awaySeconds = Math.max(0, Math.floor((Date.now() - savedTimer.lastSavedTs) / 1000));
-            if (awaySeconds > 0) {
-              const today = todayISO();
-              calculatedDailyStudy[today] = (calculatedDailyStudy[today] ?? 0) + awaySeconds;
-              calculatedTimer.lastSavedTs = Date.now();
-            }
-          }
+        // Proceed using migrated data in memory
+        const today       = todayISO();
+        const todaySecs   = migratedDailyStudy[today] || 0;
+        const timerForSW  = { sessionElapsed: todaySecs, sessionStartTs: null, lastSavedTs: Date.now() };
+        ss(K.TIMER, timerForSW);
 
-          // Force the timer to start from today's cumulative daily study time!
-          const today = todayISO();
-          const todaySeconds = calculatedDailyStudy[today] || 0;
-          calculatedTimer.sessionElapsed = todaySeconds;
-          if (calculatedTimer.sessionStartTs) {
-            calculatedTimer.sessionStartTs = Date.now() - todaySeconds * 1000;
-          }
+        const newAllSubj = {
+          algorithms: { completedIds: new Set(migratedCompleted), lectureDates: migratedLectureDates },
+        };
+        SUBJECT_LIST.forEach(s => { if (s.id !== 'algorithms') newAllSubj[s.id] = { completedIds: new Set(), lectureDates: {} }; });
 
-          // Update localStorage cache
-          ss(K.COMPLETED, savedCompleted);
-          ss(K.LECTURE_DATES, savedLectureDates);
-          ss(K.DAILY_STUDY, calculatedDailyStudy);
-          ss(K.TIMER, calculatedTimer);
-
-          // Update Firebase with recalculated daily study/timer
-          set(ref(db, 'users/rahul/stats/dailyStudy'), calculatedDailyStudy).catch(err => console.error(err));
-          set(ref(db, 'users/rahul/stats/timer'), calculatedTimer).catch(err => console.error(err));
-
-          setCompletedIds(new Set(savedCompleted));
-          setLectureDates(savedLectureDates);
-          setDailyStudy(calculatedDailyStudy);
-        } else {
-          // Database is empty OR backup was just imported OR local cache is newer.
-          const initialCompleted = ls(K.COMPLETED, []);
-          const initialLectureDates = ls(K.LECTURE_DATES, {});
-          const initialDailyStudy = ls(K.DAILY_STUDY, {});
-          
-          // Force initial timer to match today's daily study progress
-          const today = todayISO();
-          const todaySeconds = initialDailyStudy[today] || 0;
-          const initialTimer = {
-            sessionElapsed: todaySeconds,
-            sessionStartTs: null,
-            lastSavedTs: Date.now()
-          };
-
-          if (isBackupImported) {
-            localStorage.removeItem('cst_backup_imported');
-          }
-
-          const initialStats = {
-            completed: initialCompleted,
-            lectureDates: initialLectureDates,
-            dailyStudy: initialDailyStudy,
-            timer: initialTimer
-          };
-
-          // Save to Firebase
-          set(statsRef, initialStats)
-            .then(() => {
-              ss(K.COMPLETED, initialCompleted);
-              ss(K.LECTURE_DATES, initialLectureDates);
-              ss(K.DAILY_STUDY, initialDailyStudy);
-              ss(K.TIMER, initialTimer);
-
-              setCompletedIds(new Set(initialCompleted));
-              setLectureDates(initialLectureDates);
-              setDailyStudy(initialDailyStudy);
-            })
-            .catch(err => console.error('Failed to initialize stats in Firebase:', err));
-        }
-      })
-      .catch((err) => {
-        console.error('Failed to fetch stats from Firebase:', err);
-        // Fallback to localStorage on error
-        setCompletedIds(new Set(ls(K.COMPLETED, [])));
-        setLectureDates(ls(K.LECTURE_DATES, {}));
-        setDailyStudy(initDailyStudy());
-      })
-      .finally(() => {
+        setAllSubjectsData(newAllSubj);
+        setDailyStudy(migratedDailyStudy);
+        setSubjectDailyStudy(migratedSubjectDs);
         setFirebaseLoaded(true);
+        return;
+      }
+
+      // ── NORMAL LOAD (already migrated) ──
+      const [allSubjSnap, settingsSnap] = await Promise.all([
+        get(ref(db, 'users/rahul/subjects')),
+        get(ref(db, 'users/rahul/global/settings/subjects')),
+      ]);
+
+      // Load global timer + daily study
+      const gv              = globalSnap.val() || {};
+      let   savedDailyStudy = gv.dailyStudy || {};
+      const savedTimer      = gv.timer || {};
+      const savedSubjDs     = gv.subjectDailyStudy || {};
+      const savedSettings   = settingsSnap.exists() ? settingsSnap.val() : {};
+
+      // Reconcile away-time if timer was running
+      if (savedTimer.sessionStartTs && savedTimer.lastSavedTs) {
+        const away = Math.max(0, Math.floor((Date.now() - savedTimer.lastSavedTs) / 1000));
+        if (away > 0) {
+          const today = todayISO();
+          savedDailyStudy = { ...savedDailyStudy, [today]: (savedDailyStudy[today] ?? 0) + away };
+        }
+      }
+
+      // Force elapsed = today's total
+      const today     = todayISO();
+      const todaySecs = savedDailyStudy[today] || 0;
+      const calcTimer = {
+        sessionElapsed:  todaySecs,
+        sessionStartTs:  savedTimer.sessionStartTs ? Date.now() - todaySecs * 1000 : null,
+        lastSavedTs:     Date.now(),
+      };
+      ss(K.TIMER, calcTimer);
+      ss(K.DAILY_STUDY, savedDailyStudy);
+      ss(K.SUBJECT_DAILY_STUDY, savedSubjDs);
+      ss(K.SUBJECT_SETTINGS, savedSettings);
+      set(ref(db, 'users/rahul/global/dailyStudy'), savedDailyStudy).catch(console.error);
+      set(ref(db, 'users/rahul/global/timer'), calcTimer).catch(console.error);
+
+      // Load all subjects
+      const subjVal    = allSubjSnap.exists() ? allSubjSnap.val() : {};
+      const newAllSubj = {};
+      for (const subj of SUBJECT_LIST) {
+        const sd = subjVal[subj.id] || {};
+        const completedArr  = sd.completed    || [];
+        const ldObj         = sd.lectureDates || {};
+        ss(K.completed(subj.id),    completedArr);
+        ss(K.lectureDates(subj.id), ldObj);
+        newAllSubj[subj.id] = { completedIds: new Set(completedArr), lectureDates: ldObj };
+      }
+
+      setAllSubjectsData(newAllSubj);
+      setDailyStudy(savedDailyStudy);
+      setSubjectDailyStudy(savedSubjDs);
+      setSubjectSettings(savedSettings);
+      setFirebaseLoaded(true);
+    }).catch(err => {
+      console.error('Firebase load failed, using localStorage:', err);
+      // Fallback: read everything from localStorage
+      const newAllSubj = {};
+      SUBJECT_LIST.forEach(s => {
+        newAllSubj[s.id] = {
+          completedIds: new Set(ls(K.completed(s.id), [])),
+          lectureDates: ls(K.lectureDates(s.id), {}),
+        };
       });
+      setAllSubjectsData(newAllSubj);
+      setDailyStudy(initDailyStudy());
+      setSubjectDailyStudy(ls(K.SUBJECT_DAILY_STUDY, {}));
+      setSubjectSettings(ls(K.SUBJECT_SETTINGS, {}));
+      setFirebaseLoaded(true);
+    });
   }, []);
 
   // ── Sync Live Stats to Firebase ──────────────────────────────
   const [timerRunning, setTimerRunning] = useState(false);
   useEffect(() => {
     if (!firebaseLoaded) return;
-    const today = todayISO();
-    const completedLecturesToday = COURSE_DATA
-      .filter(l => completedIds.has(l.id) && lectureDates[l.id] === today)
-      .map(l => l.title);
-    
+    const today   = todayISO();
+    const subjects = {};
+
+    SUBJECT_LIST.forEach(subj => {
+      const sd            = allSubjectsData[subj.id] || {};
+      const totalCompleted = sd.completedIds?.size ?? 0;
+      const totalLectures  = subj.lectures.length;
+      const coursePct      = totalLectures > 0 ? (totalCompleted / totalLectures) * 100 : 0;
+
+      // Content watched today
+      const todayEntries = sd.lectureDates
+        ? Object.entries(sd.lectureDates).filter(([, d]) => d === today)
+        : [];
+      const todayCourseMinsSubj = todayEntries.reduce((s, [idStr]) => {
+        const lec = subj.lectures.find(l => l.id === Number(idStr));
+        return s + (lec?.duration || 0);
+      }, 0);
+      const completedToday = todayEntries
+        .map(([idStr]) => subj.lectures.find(l => l.id === Number(idStr))?.title)
+        .filter(Boolean);
+
+      // Effective goal
+      const settingsGoal = subjectSettings[subj.id]?.dailyGoalMins;
+      const goalMins     = settingsGoal !== undefined ? settingsGoal : subj.defaultDailyGoalMins;
+
+      subjects[subj.id] = {
+        todayStudySecs:   subjectDailyStudy[today]?.[subj.id] || 0,
+        todayCourseMins:  todayCourseMinsSubj,
+        completedToday,
+        totalCompleted,
+        totalLectures,
+        coursePct,
+        goalMins,
+        totalCourseMins:  subj.lectures.reduce((s, l) => s + l.duration, 0),
+      };
+    });
+
     set(ref(db, 'users/rahul/liveStats'), {
       todayStudySeconds: dailyStudy[today] || 0,
-      todayCourseMins,
-      completedLecturesToday,
       timerRunning,
-      updatedAt: new Date().toISOString()
-    }).catch(err => console.error('Firebase sync failed:', err));
-  }, [dailyStudy, todayCourseMins, completedIds, lectureDates, firebaseLoaded, timerRunning]);
+      activeSubject:     activeSubjectId,
+      streak,
+      subjects,
+      updatedAt:         new Date().toISOString(),
+    }).catch(err => console.error('Firebase liveStats sync failed:', err));
+  }, [dailyStudy, allSubjectsData, subjectDailyStudy, firebaseLoaded, timerRunning, activeSubjectId, subjectSettings, streak]);
 
-  // ── Timer tick: update daily study seconds ────────────────────
-  // Uses ref-based pattern: read ref → compute next → update ref + storage + state
-  // (Never calls setState inside another setState updater)
+  // ── Timer tick ────────────────────────────────────────────────
   const handleTimerTick = useCallback((delta = 1) => {
-    if (!dailyStudyRef.current) return;
+    if (dailyStudyRef.current == null) return;
     const today = todayISO();
-    const next  = {
-      ...dailyStudyRef.current,
-      [today]: (dailyStudyRef.current[today] ?? 0) + delta,
-    };
-    dailyStudyRef.current = next;   // immediate ref update
-    ss(K.DAILY_STUDY, next);        // persist
 
-    // Sync to Firebase
-    set(ref(db, 'users/rahul/stats/dailyStudy'), next).catch(err => console.error(err));
+    // Global daily study
+    const nextDs = { ...dailyStudyRef.current, [today]: (dailyStudyRef.current[today] ?? 0) + delta };
+    dailyStudyRef.current = nextDs;
+    ss(K.DAILY_STUDY, nextDs);
+    // Throttle Firebase write to every 10 s
+    if (nextDs[today] % 10 === 0) {
+      set(ref(db, 'users/rahul/global/dailyStudy'), nextDs).catch(console.error);
+    }
+    setDailyStudy(nextDs);
 
-    setDailyStudy(next);            // schedule re-render
-    setTimerRunning(true);          // keep liveStats in sync
+    // Per-subject credit
+    const nextSDs  = { ...subjectDailyStudyRef.current };
+    if (!nextSDs[today]) nextSDs[today] = {};
+    const activeId = localStorage.getItem(K.ACTIVE_SUBJECT) || 'algorithms';
+    nextSDs[today][activeId] = (nextSDs[today][activeId] ?? 0) + delta;
+    subjectDailyStudyRef.current = nextSDs;
+    ss(K.SUBJECT_DAILY_STUDY, nextSDs);
+    if (nextDs[today] % 10 === 0) {
+      set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
+    }
+    setSubjectDailyStudy(nextSDs);
   }, []);
 
-  const handleTimerAdjust = useCallback((delta) => {
-    if (!dailyStudyRef.current) return;
-    const today = todayISO();
-    const next  = {
+  const handleTimerAdjust = useCallback((deltaMinutes) => {
+    if (dailyStudyRef.current == null) return;
+    const today  = todayISO();
+    const nextDs = {
       ...dailyStudyRef.current,
-      [today]: Math.max(0, (dailyStudyRef.current[today] ?? 0) + delta),
+      [today]: Math.max(0, (dailyStudyRef.current[today] ?? 0) + deltaMinutes * 60),
     };
-    dailyStudyRef.current = next;   // immediate ref update
-    ss(K.DAILY_STUDY, next);        // persist
-
-    // Sync to Firebase
-    set(ref(db, 'users/rahul/stats/dailyStudy'), next).catch(err => console.error(err));
-
-    setDailyStudy(next);            // schedule re-render
+    dailyStudyRef.current = nextDs;
+    ss(K.DAILY_STUDY, nextDs);
+    set(ref(db, 'users/rahul/global/dailyStudy'), nextDs).catch(console.error);
+    setDailyStudy(nextDs);
   }, []);
+
+  // ── Timer reset — zeros today's study time completely ─────────
+  const handleTimerReset = useCallback(() => {
+    const today  = todayISO();
+    // Zero global daily study for today
+    const nextDs = { ...dailyStudyRef.current, [today]: 0 };
+    dailyStudyRef.current = nextDs;
+    ss(K.DAILY_STUDY, nextDs);
+    set(ref(db, 'users/rahul/global/dailyStudy'), nextDs).catch(console.error);
+    setDailyStudy(nextDs);
+    // Zero per-subject study for today
+    const nextSDs = { ...subjectDailyStudyRef.current, [today]: {} };
+    subjectDailyStudyRef.current = nextSDs;
+    ss(K.SUBJECT_DAILY_STUDY, nextSDs);
+    set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
+    setSubjectDailyStudy(nextSDs);
+  }, []);
+
+  // ── Subject switch ─────────────────────────────────────────────
+  const switchSubject = useCallback((newId) => {
+    if (newId === activeSubjectId) return;
+    const today    = todayISO();
+    const totalNow = dailyStudyRef.current[today] ?? 0;
+    const base     = subjectSwitchBaseRef.current ?? 0;
+    const delta    = totalNow - base;
+
+    if (delta > 0) {
+      const nextSDs = { ...subjectDailyStudyRef.current };
+      if (!nextSDs[today]) nextSDs[today] = {};
+      nextSDs[today][activeSubjectId] = (nextSDs[today][activeSubjectId] ?? 0) + delta;
+      subjectDailyStudyRef.current = nextSDs;
+      ss(K.SUBJECT_DAILY_STUDY, nextSDs);
+      set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
+      setSubjectDailyStudy(nextSDs);
+    }
+
+    subjectSwitchBaseRef.current = totalNow;
+    localStorage.setItem(K.ACTIVE_SUBJECT, newId);
+    setActiveSubjectId(newId);
+  }, [activeSubjectId]);
 
   // ── Lecture toggle ────────────────────────────────────────────
-  // Compute both next states from refs, then call both setters with values (no nesting)
   const toggleLecture = useCallback((id) => {
     const today       = todayISO();
-    const isCompleted = completedIdsRef.current.has(id);
+    const subjId      = activeSubjectId;
+    const current     = allSubjectsDataRef.current[subjId] || { completedIds: new Set(), lectureDates: {} };
+    const isCompleted = current.completedIds.has(id);
 
-    const nextIds   = new Set(completedIdsRef.current);
-    const nextDates = { ...lectureDatesRef.current };
+    const nextIds   = new Set(current.completedIds);
+    const nextDates = { ...current.lectureDates };
 
     if (isCompleted) {
       nextIds.delete(id);
@@ -1182,50 +1295,83 @@ export default function App() {
     }
 
     const arrayIds = [...nextIds];
-    ss(K.COMPLETED, arrayIds);
-    ss(K.LECTURE_DATES, nextDates);
+    ss(K.completed(subjId),    arrayIds);
+    ss(K.lectureDates(subjId), nextDates);
+    set(ref(db, `users/rahul/subjects/${subjId}/completed`),    arrayIds).catch(console.error);
+    set(ref(db, `users/rahul/subjects/${subjId}/lectureDates`), nextDates).catch(console.error);
 
-    // Sync to Firebase
-    set(ref(db, 'users/rahul/stats/completed'), arrayIds).catch(err => console.error(err));
-    set(ref(db, 'users/rahul/stats/lectureDates'), nextDates).catch(err => console.error(err));
-
-    setCompletedIds(nextIds);
-    setLectureDates(nextDates);
-  }, []);
+    setAllSubjectsData(prev => ({
+      ...prev,
+      [subjId]: { completedIds: nextIds, lectureDates: nextDates },
+    }));
+  }, [activeSubjectId]);
 
   /* ── Render ─────────────────────────────────────────────────── */
   if (!firebaseLoaded) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-400">
         <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+          <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
           <p className="text-sm font-medium tracking-wide">Syncing study progress...</p>
         </div>
       </div>
     );
   }
+
+  const subjectAccent = ACCENT[activeSubject.accent] || ACCENT.indigo;
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
 
       {/* Sticky Header */}
       <header className="sticky top-0 z-50 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-4">
+          {/* Logo */}
+          <div className="flex items-center gap-2.5 flex-shrink-0">
             <div className="w-7 h-7 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center">
               <BookOpen size={14} className="text-indigo-400" />
             </div>
-            <div>
-              <h1 className="text-sm font-bold text-slate-100 leading-none">Algorithms Course Tracker</h1>
+            <div className="hidden sm:block">
+              <h1 className="text-sm font-bold text-slate-100 leading-none">Study Tracker</h1>
               <p className="text-xs text-slate-500 mt-0.5 leading-none">Deep Focus Dashboard</p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+
+          {/* Subject Tab Switcher */}
+          <div className="flex items-center gap-1.5 flex-1 overflow-x-auto scrollbar-none">
+            {SUBJECT_LIST.map(subj => {
+              const isActive = subj.id === activeSubjectId;
+              const subjData = allSubjectsData[subj.id] || {};
+              const done     = subjData.completedIds?.size ?? 0;
+              const total    = subj.lectures.length;
+              const ac       = ACCENT[subj.accent] || ACCENT.indigo;
+              return (
+                <button
+                  key={subj.id}
+                  onClick={() => switchSubject(subj.id)}
+                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all duration-200 whitespace-nowrap ${
+                    isActive
+                      ? `${ac.tab} shadow-sm`
+                      : 'text-slate-500 border-slate-800 hover:text-slate-300 hover:border-slate-700 bg-transparent'
+                  }`}
+                >
+                  <span>{subj.icon}</span>
+                  <span>{subj.shortName}</span>
+                  <span className={`font-mono text-[10px] ${isActive ? 'opacity-70' : 'opacity-40'}`}>
+                    {done}/{total}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Right: streak + progress dot */}
+          <div className="flex items-center gap-3 flex-shrink-0">
             {streak > 0 && (
               <span className="hidden sm:flex items-center gap-1 text-xs font-bold text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
-                <Flame size={11} /> {streak}d streak
+                <Flame size={11} /> {streak}d
               </span>
             )}
-            <span className="text-xs text-slate-500 font-mono">{completedIds.size}/{COURSE_DATA.length}</span>
             <div
               className="w-2 h-2 rounded-full"
               style={{ background: coursePct === 100 ? '#34d399' : coursePct > 0 ? '#6366f1' : '#475569' }}
@@ -1236,27 +1382,27 @@ export default function App() {
 
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
 
-        {/* Row 1: Analytics + Timer column */}
+        {/* Row 1: Analytics + Timer */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-
-          {/* Left: metric cards + progress — flex-col so progress card can stretch to match right column height */}
           <div className="lg:col-span-2 flex flex-col gap-3">
             <div className="grid grid-cols-3 gap-3">
-              <MetricCard icon={Clock}        label="Total Duration" value={fmtMins(TOTAL_MINS)}    sub={`${COURSE_DATA.length} lectures`}              accent="indigo"  />
+              <MetricCard icon={Clock}        label="Total Duration" value={fmtMins(TOTAL_MINS)}    sub={`${lectureList.length} lectures`}              accent={activeSubject.accent} />
               <MetricCard icon={CheckCircle2} label="Completed"      value={fmtMins(completedMins)} sub={`${completedIds.size} done`}                   accent="emerald" />
-              <MetricCard icon={TrendingUp}   label="Remaining"      value={fmtMins(remainingMins)} sub={`${COURSE_DATA.length - completedIds.size} left`} accent="amber"   />
+              <MetricCard icon={TrendingUp}   label="Remaining"      value={fmtMins(remainingMins)} sub={`${lectureList.length - completedIds.size} left`} accent="amber" />
             </div>
             <div className="flex-1 rounded-xl border border-slate-700/50 bg-slate-800/30 p-4">
               <div className="flex items-center gap-2 mb-3">
-                <Zap size={13} className="text-indigo-400" />
-                <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Course Progress</span>
+                <Zap size={13} className={subjectAccent.text} />
+                <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+                  {activeSubject.icon} {activeSubject.name} — Course Progress
+                </span>
               </div>
-              <CourseProgressBar pct={coursePct} />
+              <CourseProgressBar pct={coursePct} accent={activeSubject.accent} />
               <div className="mt-3 grid grid-cols-3 gap-2 text-center">
                 {[
-                  { label: 'Sections',  value: SECTIONS.length,                                  color: 'text-indigo-300' },
-                  { label: 'Done',      value: completedIds.size,                                color: 'text-emerald-300' },
-                  { label: 'Remaining', value: COURSE_DATA.length - completedIds.size,           color: 'text-amber-300' },
+                  { label: 'Sections',  value: SECTIONS.length,                              color: subjectAccent.text    },
+                  { label: 'Done',      value: completedIds.size,                            color: 'text-emerald-300' },
+                  { label: 'Remaining', value: lectureList.length - completedIds.size,       color: 'text-amber-300'   },
                 ].map(item => (
                   <div key={item.label} className="rounded-lg bg-slate-900/50 border border-slate-800/80 py-2.5">
                     <p className={`text-base font-bold font-mono ${item.color}`}>{item.value}</p>
@@ -1267,15 +1413,21 @@ export default function App() {
             </div>
           </div>
 
-          {/* Right: timer + daily goal */}
           <div className="lg:col-span-1 flex flex-col gap-3">
             <Stopwatch
               onTick={handleTimerTick}
               onAdjust={handleTimerAdjust}
+              onReset={handleTimerReset}
               firebaseInitialElapsed={firebaseLoaded ? (dailyStudy[todayISO()] ?? 0) : null}
               onRunningChange={setTimerRunning}
             />
-            <DailyGoalCard todayCourseMins={todayCourseMins} streak={streak} />
+            <DailyGoalCard
+              todayCourseMins={todayCourseMins}
+              streak={streak}
+              goalMins={goalMins}
+              onGoalChange={handleGoalChange}
+              accent={activeSubject.accent}
+            />
           </div>
         </div>
 
@@ -1283,7 +1435,9 @@ export default function App() {
         <section>
           <div className="flex items-center gap-2 mb-4">
             <BookOpen size={15} className="text-slate-400" />
-            <h2 className="text-sm font-semibold uppercase tracking-widest text-slate-400">Course Syllabus</h2>
+            <h2 className="text-sm font-semibold uppercase tracking-widest text-slate-400">
+              {activeSubject.icon} {activeSubject.name} — Syllabus
+            </h2>
             <div className="flex-1 h-px bg-slate-800 ml-2" />
             <span className="text-xs text-slate-600 font-mono">{SECTIONS.length} sections</span>
           </div>
@@ -1302,7 +1456,7 @@ export default function App() {
         </section>
 
         {/* Study History */}
-        <StudyHistory mergedHistory={mergedHistory} />
+        <StudyHistory mergedHistory={mergedHistory} subjectSettings={subjectSettings} />
 
         {/* Footer */}
         <footer className="py-4 border-t border-slate-800/50">
@@ -1311,22 +1465,29 @@ export default function App() {
               All progress synced to Firebase · backed up locally · {new Date().getFullYear()}
             </p>
             <div className="flex gap-2">
-              {/* Export */}
               <button
                 id="export-data"
                 onClick={() => {
+                  const subjExport = {};
+                  SUBJECT_LIST.forEach(s => {
+                    subjExport[s.id] = {
+                      completed:    ls(K.completed(s.id), []),
+                      lectureDates: ls(K.lectureDates(s.id), {}),
+                    };
+                  });
                   const payload = {
-                    version: 4,
-                    exportedAt: new Date().toISOString(),
-                    completed:     ls(K.COMPLETED, []),
-                    lectureDates:  ls(K.LECTURE_DATES, {}),
-                    dailyStudy:    ls(K.DAILY_STUDY, {}),
-                    timer:         ls(K.TIMER, {}),
+                    version: 5,
+                    exportedAt:        new Date().toISOString(),
+                    subjects:          subjExport,
+                    dailyStudy:        ls(K.DAILY_STUDY, {}),
+                    subjectDailyStudy: ls(K.SUBJECT_DAILY_STUDY, {}),
+                    timer:             ls(K.TIMER, {}),
+                    subjectSettings:   ls(K.SUBJECT_SETTINGS, {}),
                   };
                   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
                   const a    = document.createElement('a');
                   a.href     = URL.createObjectURL(blob);
-                  a.download = `course-tracker-backup-${todayISO()}.json`;
+                  a.download = `study-tracker-backup-${todayISO()}.json`;
                   a.click();
                   URL.revokeObjectURL(a.href);
                 }}
@@ -1334,7 +1495,6 @@ export default function App() {
               >
                 ↓ Export backup
               </button>
-              {/* Import */}
               <label
                 id="import-data"
                 className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-700/60 text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 transition-all cursor-pointer"
@@ -1351,12 +1511,16 @@ export default function App() {
                     reader.onload = (ev) => {
                       try {
                         const data = JSON.parse(ev.target.result);
-                        if (data.version !== 4) { alert('Incompatible backup version.'); return; }
+                        if (data.version !== 5) { alert('Incompatible backup version (expected v5).'); return; }
                         if (!confirm('This will overwrite your current progress. Continue?')) return;
-                        if (data.completed)    ss(K.COMPLETED,     data.completed);
-                        if (data.lectureDates) ss(K.LECTURE_DATES, data.lectureDates);
-                        if (data.dailyStudy)   ss(K.DAILY_STUDY,   data.dailyStudy);
-                        if (data.timer)        ss(K.TIMER,         data.timer);
+                        SUBJECT_LIST.forEach(s => {
+                          if (data.subjects?.[s.id]?.completed)    ss(K.completed(s.id),    data.subjects[s.id].completed);
+                          if (data.subjects?.[s.id]?.lectureDates) ss(K.lectureDates(s.id), data.subjects[s.id].lectureDates);
+                        });
+                        if (data.dailyStudy)        ss(K.DAILY_STUDY,         data.dailyStudy);
+                        if (data.subjectDailyStudy) ss(K.SUBJECT_DAILY_STUDY, data.subjectDailyStudy);
+                        if (data.timer)             ss(K.TIMER,               data.timer);
+                        if (data.subjectSettings)   ss(K.SUBJECT_SETTINGS,    data.subjectSettings);
                         localStorage.setItem('cst_backup_imported', 'true');
                         window.location.reload();
                       } catch { alert('Invalid backup file.'); }
