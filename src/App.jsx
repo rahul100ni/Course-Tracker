@@ -413,14 +413,30 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
     setEditMode(true);
   };
   const saveEdit = () => {
+    // Compute new elapsed in whole seconds (hours + minutes + seconds).
+    // We no longer truncate to minutes — seconds input is available.
     const newElapsed = (parseInt(editH || '0') * 3600) + (parseInt(editM || '0') * 60);
-    const delta      = newElapsed - elapsedRef.current;
     elapsedRef.current = newElapsed;
     setElapsed(newElapsed);
-    onAdjust(Math.round(delta / 60));
-    persistTimer(newElapsed, running, running ? Date.now() - newElapsed * 1000 : null);
+
+    // CRITICAL: re-anchor startTsRef to the new elapsed.
+    // Without this, the wall-clock interval would compute trueElapsed from the
+    // old anchor and snap the display back to the pre-edit time on the next tick.
+    if (running) {
+      startTsRef.current = Date.now() - newElapsed * 1000;
+    }
+
+    // Pass newElapsed directly — NOT rounded deltaMinutes.
+    // The old code did: onAdjust(Math.round((newElapsed - oldElapsed) / 60))
+    // then handleTimerAdjust multiplied back by 60. This introduced up to
+    // 59 seconds of rounding error (e.g. 20:37 → 12:00 rounded to -9 min
+    // instead of -517s, leaving dailyStudy 23 seconds off).
+    onAdjust(newElapsed);
+
+    persistTimer(newElapsed, running, running ? startTsRef.current : null);
     setEditMode(false);
   };
+
 
   if (editMode) {
     return (
@@ -1483,6 +1499,10 @@ export default function App() {
       updatedAt:         new Date().toISOString(),
     }).catch(err => console.error('liveStats push failed:', err));
   }, [firebaseLoaded]); // ← stable: data read from refs, not state closures
+  // Ref so handleTimerAdjust can trigger an immediate push without being
+  // a dep of pushLiveStats (which would break the stable callback).
+  const pushLiveStatsRef = useRef(null);
+  useEffect(() => { pushLiveStatsRef.current = pushLiveStats; }, [pushLiveStats]);
 
   // Effect A: push immediately when structural data changes
   // (lecture ticked, goal changed, subject switched, timer toggled, streak changed)
@@ -1561,18 +1581,29 @@ export default function App() {
     return () => window.removeEventListener('pagehide', handleHide);
   }, []);
 
-  const handleTimerAdjust = useCallback((deltaMinutes) => {
+  // handleTimerAdjust: called when user edits the timer display.
+  // Accepts newElapsed (seconds) directly — not a delta in minutes.
+  // Setting dailyStudy[today] = newElapsed is exact (no rounding error).
+  // Also pushes liveStats immediately so LiveView updates without needing
+  // the user to press play (previously liveStats only updated on timerRunning
+  // change, leaving LiveView stale after an adjustment while paused).
+  const handleTimerAdjust = useCallback((newElapsed) => {
     if (dailyStudyRef.current == null) return;
     const today  = todayISO();
-    const nextDs = {
-      ...dailyStudyRef.current,
-      [today]: Math.max(0, (dailyStudyRef.current[today] ?? 0) + deltaMinutes * 60),
-    };
+    // Set directly to newElapsed — the new elapsed IS the new daily total
+    const nextDs = { ...dailyStudyRef.current, [today]: Math.max(0, newElapsed) };
     dailyStudyRef.current = nextDs;
     ss(K.DAILY_STUDY, nextDs);
     set(ref(db, 'users/rahul/global/dailyStudy'), nextDs).catch(console.error);
     setDailyStudy(nextDs);
+    // Also update subjectSwitchBase so subject credit doesn't count
+    // the adjusted-away seconds as study time for the active subject
+    subjectSwitchBaseRef.current = Math.max(0, newElapsed);
+    // Push liveStats right away so LiveView reflects the new time
+    // without waiting for the next timerRunning toggle.
+    pushLiveStatsRef.current?.();
   }, []);
+
 
   // ── Timer reset — zeros today's study time completely ─────────
   const handleTimerReset = useCallback(() => {
