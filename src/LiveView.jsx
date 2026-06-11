@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { ref, onValue } from 'firebase/database';
 import { db } from './firebase';
 import {
-  Clock, BookOpen, CheckCircle2, Flame,
+  BookOpen, CheckCircle2, Flame,
   TrendingUp, Target, Zap, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { SUBJECTS, SUBJECT_LIST } from './subjects/index';
@@ -36,19 +36,21 @@ function updatedLabel(iso) {
 const A = {
   indigo: {
     card:       'border-indigo-500/25 bg-indigo-500/5',
-    cardActive: 'border-indigo-400/50 bg-indigo-500/10 shadow-indigo-500/10 shadow-lg',
+    cardActive: 'border-indigo-400/50 bg-indigo-500/10',
     label:      'text-indigo-300',
     badge:      'bg-indigo-500/15 text-indigo-300 border-indigo-500/25',
     bar:        'linear-gradient(90deg,#6366f1,#a78bfa)',
     dot:        'bg-indigo-400',
+    glow:       'shadow-indigo-500/20',
   },
   violet: {
     card:       'border-violet-500/25 bg-violet-500/5',
-    cardActive: 'border-violet-400/50 bg-violet-500/10 shadow-violet-500/10 shadow-lg',
+    cardActive: 'border-violet-400/50 bg-violet-500/10',
     label:      'text-violet-300',
     badge:      'bg-violet-500/15 text-violet-300 border-violet-500/25',
     bar:        'linear-gradient(90deg,#7c3aed,#c4b5fd)',
     dot:        'bg-violet-400',
+    glow:       'shadow-violet-500/20',
   },
 };
 const getA = (accent) => A[accent] || A.indigo;
@@ -65,19 +67,20 @@ function ProgressBar({ pct, gradient, height = 'h-2' }) {
   );
 }
 
-/* ─── StatPill ────────────────────────────────────────────────── */
-function StatPill({ label, value, color = 'text-slate-300' }) {
+/* ─── StatBox ─────────────────────────────────────────────────── */
+function StatBox({ label, value, color = 'text-slate-300', sub }) {
   return (
-    <div className="flex flex-col items-center gap-0.5 px-3 py-2 rounded-lg bg-slate-900/60 border border-slate-800">
-      <span className={`text-sm font-bold font-mono ${color}`}>{value}</span>
-      <span className="text-[10px] text-slate-500 uppercase tracking-wider">{label}</span>
+    <div className="flex-1 min-w-0 flex flex-col items-center gap-0.5 px-2 py-2.5 rounded-xl bg-slate-900/70 border border-slate-800/80">
+      <span className={`text-base font-bold font-mono leading-none ${color}`}>{value}</span>
+      <span className="text-[9px] text-slate-500 uppercase tracking-wider mt-0.5 text-center leading-tight">{label}</span>
+      {sub && <span className="text-[9px] text-slate-600 font-mono">{sub}</span>}
     </div>
   );
 }
 
 /* ─── SubjectCard ─────────────────────────────────────────────── */
 function SubjectCard({ subj, data, isActive, running }) {
-  const [showLectures, setShowLectures] = useState(true);
+  const [showLectures, setShowLectures] = useState(false);
   const ac         = getA(subj.accent);
   const goalMins   = data?.goalMins ?? subj.defaultDailyGoalMins;
   const hasGoal    = goalMins > 0;
@@ -91,59 +94,58 @@ function SubjectCard({ subj, data, isActive, running }) {
   const lectures   = data?.completedToday  ?? [];
 
   return (
-    <div className={`rounded-2xl border p-5 flex flex-col gap-4 transition-all duration-300 ${
-      isActive ? ac.cardActive : ac.card
+    <div className={`rounded-2xl border p-4 flex flex-col gap-3 transition-all duration-300 ${
+      isActive ? `${ac.cardActive} shadow-lg ${ac.glow}` : ac.card
     }`}>
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <span className="text-2xl">{subj.icon}</span>
-          <div>
-            <p className={`text-sm font-bold leading-none ${ac.label}`}>{subj.name}</p>
+
+      {/* Header row */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-xl flex-shrink-0">{subj.icon}</span>
+          <div className="min-w-0">
+            <p className={`text-sm font-bold leading-none truncate ${ac.label}`}>{subj.name}</p>
             {isActive && running && (
               <p className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1">
-                <span className={`w-1 h-1 rounded-full ${ac.dot} animate-pulse`} />
+                <span className={`w-1 h-1 rounded-full ${ac.dot} animate-pulse flex-shrink-0`} />
                 Studying now
               </p>
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5 flex-shrink-0">
           {goalMet && (
-            <span className="flex items-center gap-1 text-[10px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
-              <CheckCircle2 size={10} /> Goal met
+            <span className="flex items-center gap-1 text-[9px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded-full whitespace-nowrap">
+              <CheckCircle2 size={8} /> Done
             </span>
           )}
-          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border ${ac.badge}`}>
+          <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full border ${ac.badge}`}>
             {totalDone}/{totalLec}
           </span>
         </div>
       </div>
 
-      {/* Today's stats row */}
-      <div className="grid grid-cols-2 gap-2">
-        <div className="rounded-xl bg-slate-900/60 border border-slate-800 p-3">
-          <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Focus time</p>
-          <p className={`text-lg font-bold font-mono ${studySecs > 0 ? ac.label : 'text-slate-600'}`}>
-            {studySecs > 0 ? fmtSecs(studySecs) : '—'}
-          </p>
-        </div>
-        <div className="rounded-xl bg-slate-900/60 border border-slate-800 p-3">
-          <p className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Content</p>
-          <p className={`text-lg font-bold font-mono ${contentMin > 0 ? 'text-emerald-300' : 'text-slate-600'}`}>
-            {contentMin > 0 ? fmtMins(contentMin) : '—'}
-          </p>
-        </div>
+      {/* Today's stats — horizontal 2-col, compact on mobile */}
+      <div className="flex gap-2">
+        <StatBox
+          label="Focus time"
+          value={studySecs > 0 ? fmtSecs(studySecs) : '—'}
+          color={studySecs > 0 ? ac.label : 'text-slate-600'}
+        />
+        <StatBox
+          label="Content"
+          value={contentMin > 0 ? fmtMins(contentMin) : '—'}
+          color={contentMin > 0 ? 'text-emerald-300' : 'text-slate-600'}
+        />
       </div>
 
       {/* Daily goal bar */}
       {hasGoal && (
         <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10px] text-slate-500 uppercase tracking-wider flex items-center gap-1">
-              <Target size={9} /> Daily goal
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[9px] text-slate-500 uppercase tracking-wider flex items-center gap-1">
+              <Target size={8} /> Daily goal
             </span>
-            <span className={`text-[10px] font-mono font-semibold ${goalMet ? 'text-emerald-400' : 'text-slate-500'}`}>
+            <span className={`text-[9px] font-mono font-semibold ${goalMet ? 'text-emerald-400' : 'text-slate-500'}`}>
               {fmtMins(contentMin)} / {fmtMins(goalMins)}
             </span>
           </div>
@@ -156,8 +158,8 @@ function SubjectCard({ subj, data, isActive, running }) {
             }
           />
           {!goalMet && contentMin > 0 && (
-            <p className="text-[10px] text-slate-600 mt-1 font-mono">
-              {fmtMins(Math.max(goalMins - contentMin, 0))} left to goal
+            <p className="text-[9px] text-slate-600 mt-0.5 font-mono">
+              {fmtMins(Math.max(goalMins - contentMin, 0))} left
             </p>
           )}
         </div>
@@ -165,42 +167,46 @@ function SubjectCard({ subj, data, isActive, running }) {
 
       {/* Course progress bar */}
       <div>
-        <div className="flex items-center justify-between mb-1.5">
-          <span className="text-[10px] text-slate-500 uppercase tracking-wider flex items-center gap-1">
-            <TrendingUp size={9} /> Course progress
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[9px] text-slate-500 uppercase tracking-wider flex items-center gap-1">
+            <TrendingUp size={8} /> Course
           </span>
-          <span className={`text-[10px] font-mono font-semibold ${ac.label}`}>
+          <span className={`text-[9px] font-mono font-semibold ${ac.label}`}>
             {coursePct.toFixed(1)}%
           </span>
         </div>
-        <ProgressBar pct={coursePct} gradient={coursePct === 100 ? 'linear-gradient(90deg,#10b981,#34d399)' : ac.bar} height="h-1.5" />
-        <p className="text-[10px] text-slate-600 mt-1 font-mono">
-          {totalDone} of {totalLec} lectures · {fmtMins(data?.totalCourseMins ?? 0)} total
+        <ProgressBar
+          pct={coursePct}
+          gradient={coursePct === 100 ? 'linear-gradient(90deg,#10b981,#34d399)' : ac.bar}
+          height="h-1.5"
+        />
+        <p className="text-[9px] text-slate-600 mt-0.5 font-mono">
+          {totalDone} of {totalLec} lectures
         </p>
       </div>
 
-      {/* Lectures completed today */}
+      {/* Completed today — collapsible */}
       {lectures.length > 0 && (
         <div>
           <button
-            className="flex items-center justify-between w-full text-left mb-2"
+            className="flex items-center justify-between w-full text-left py-1"
             onClick={() => setShowLectures(v => !v)}
           >
-            <span className="text-[10px] text-slate-500 uppercase tracking-wider flex items-center gap-1">
-              <CheckCircle2 size={9} className="text-emerald-500" />
-              Completed today ({lectures.length})
+            <span className="text-[9px] text-slate-500 uppercase tracking-wider flex items-center gap-1">
+              <CheckCircle2 size={8} className="text-emerald-500" />
+              Done today ({lectures.length})
             </span>
             {showLectures
-              ? <ChevronUp size={11} className="text-slate-600" />
-              : <ChevronDown size={11} className="text-slate-600" />
+              ? <ChevronUp size={10} className="text-slate-600" />
+              : <ChevronDown size={10} className="text-slate-600" />
             }
           </button>
           {showLectures && (
-            <div className="space-y-1.5 max-h-32 overflow-y-auto pr-1">
+            <div className="space-y-1.5 max-h-28 overflow-y-auto pr-1 mt-1">
               {lectures.map((title, i) => (
-                <div key={i} className="flex items-start gap-2">
-                  <CheckCircle2 size={12} className="text-emerald-400 mt-0.5 flex-shrink-0" />
-                  <p className="text-xs text-slate-400 leading-snug">{title}</p>
+                <div key={i} className="flex items-start gap-1.5">
+                  <CheckCircle2 size={10} className="text-emerald-400 mt-0.5 flex-shrink-0" />
+                  <p className="text-[11px] text-slate-400 leading-snug">{title}</p>
                 </div>
               ))}
             </div>
@@ -247,13 +253,11 @@ export default function LiveView() {
   const streak   = stats?.streak    ?? 0;
   const running  = stats?.timerRunning ?? false;
 
-  // Only subjects with actual activity today
   const studiedSubjects = SUBJECT_LIST.filter(s => {
     const sd = subjects[s.id];
     return (sd?.todayStudySecs ?? 0) > 0 || (sd?.todayCourseMins ?? 0) > 0;
   });
 
-  // Combined goal: only when 2+ studied subjects have a goal
   const studiedWithGoal  = studiedSubjects.filter(s => (subjects[s.id]?.goalMins ?? 0) > 0);
   const showCombined     = studiedWithGoal.length >= 2;
   const combinedGoalMins = studiedWithGoal.reduce((n, s) => n + (subjects[s.id]?.goalMins ?? 0), 0);
@@ -261,16 +265,13 @@ export default function LiveView() {
   const combinedPct      = combinedGoalMins > 0 ? Math.min((combinedContent / combinedGoalMins) * 100, 100) : 0;
   const combinedMet      = combinedGoalMins > 0 && combinedContent >= combinedGoalMins;
 
-  // Hero stats (across ALL studied subjects, not just those with goals)
-  const totalContentToday  = studiedSubjects.reduce((n, s) => n + (subjects[s.id]?.todayCourseMins ?? 0), 0);
-  const totalLectureToday  = studiedSubjects.reduce((n, s) => n + (subjects[s.id]?.completedToday?.length ?? 0), 0);
+  const totalContentToday = studiedSubjects.reduce((n, s) => n + (subjects[s.id]?.todayCourseMins ?? 0), 0);
+  const totalLectureToday = studiedSubjects.reduce((n, s) => n + (subjects[s.id]?.completedToday?.length ?? 0), 0);
 
-  // All-time course progress
   const totalAllLectures = SUBJECT_LIST.reduce((n, s) => n + s.lectures.length, 0);
   const totalAllDone     = SUBJECT_LIST.reduce((n, s) => n + (subjects[s.id]?.totalCompleted ?? 0), 0);
   const totalAllPct      = totalAllLectures > 0 ? (totalAllDone / totalAllLectures) * 100 : 0;
 
-  // Active subject metadata
   const activeSubj = stats?.activeSubject ? (SUBJECTS[stats.activeSubject] || null) : null;
 
   /* ── Loading */
@@ -289,64 +290,61 @@ export default function LiveView() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
 
-      {/* Sticky Header */}
-      <header className="sticky top-0 z-50 border-b border-slate-800/70 bg-slate-950/80 backdrop-blur-xl">
-        <div className="max-w-3xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2.5">
-            <div className="w-7 h-7 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center">
-              <BookOpen size={14} className="text-indigo-400" />
+      {/* ── Sticky Header ────────────────────────────────────────── */}
+      <header className="sticky top-0 z-50 border-b border-slate-800/70 bg-slate-950/90 backdrop-blur-xl">
+        <div className="max-w-2xl mx-auto px-4 py-2.5 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-6 h-6 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center flex-shrink-0">
+              <BookOpen size={12} className="text-indigo-400" />
             </div>
             <div>
-              <p className="text-sm font-bold text-slate-100 leading-none">Study Tracker</p>
-              <p className="text-[10px] text-slate-600 mt-0.5 leading-none">Live Dashboard</p>
+              <p className="text-xs font-bold text-slate-100 leading-none">Study Tracker</p>
+              <p className="text-[9px] text-slate-600 leading-none mt-0.5">Live Dashboard</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             {streak > 0 && (
-              <span className="flex items-center gap-1 text-xs font-bold text-amber-300 bg-amber-500/10 border border-amber-500/20 px-2 py-0.5 rounded-full">
-                <Flame size={11} /> {streak}d streak
+              <span className="flex items-center gap-1 text-[10px] font-bold text-amber-300 bg-amber-500/10 border border-amber-500/20 px-1.5 py-0.5 rounded-full">
+                <Flame size={9} /> {streak}d
               </span>
             )}
-            <div className={`flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-full border ${
+            <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full border ${
               running
                 ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
                 : 'bg-slate-800 text-slate-500 border-slate-700'
             }`}>
-              <span className={`w-1.5 h-1.5 rounded-full ${running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${running ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
               {running ? 'Live' : 'Paused'}
             </div>
-            {stats?.updatedAt && (
-              <span className="hidden sm:block text-[10px] text-slate-600 font-mono">
-                {updatedLabel(stats.updatedAt)}
-              </span>
-            )}
           </div>
         </div>
       </header>
 
-      <main className="max-w-3xl mx-auto px-4 py-6 space-y-5">
+      <main className="max-w-2xl mx-auto px-3 py-4 space-y-4 pb-8">
 
-        {/* Hero Timer */}
-        <div className={`rounded-2xl border p-6 text-center transition-all duration-500 ${
+        {/* ── Hero Timer ────────────────────────────────────────── */}
+        <div className={`rounded-2xl border p-5 text-center transition-all duration-500 ${
           running
-            ? 'border-indigo-500/30 bg-gradient-to-b from-indigo-500/10 to-slate-900/50 shadow-indigo-500/10 shadow-xl'
+            ? 'border-indigo-500/30 bg-gradient-to-b from-indigo-500/10 to-slate-900/50 shadow-xl shadow-indigo-500/10'
             : 'border-slate-800 bg-slate-900/40'
         }`}>
-          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500 mb-4">
-            Today's Total Study Time
+          <p className="text-[9px] font-semibold uppercase tracking-[0.2em] text-slate-500 mb-3">
+            Today's Study Time
           </p>
 
-          <div className={`text-7xl font-bold font-mono tracking-widest tabular-nums transition-colors duration-300 ${
+          {/* Clock — responsive font size */}
+          <div className={`font-bold font-mono tabular-nums transition-colors duration-300 leading-none ${
             running ? 'text-indigo-300' : 'text-slate-500'
-          }`}>
+          }`} style={{ fontSize: 'clamp(2.5rem, 14vw, 4.5rem)', letterSpacing: '0.06em' }}>
             {fmtClock(displaySecs)}
           </div>
 
+          {/* Active subject indicator */}
           {activeSubj && running && (
-            <div className="mt-4 flex items-center justify-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${getA(activeSubj.accent).dot} animate-pulse`} />
-              <span className="text-sm text-slate-400">
+            <div className="mt-3 flex items-center justify-center gap-1.5">
+              <span className={`w-1.5 h-1.5 rounded-full ${getA(activeSubj.accent).dot} animate-pulse flex-shrink-0`} />
+              <span className="text-xs text-slate-400">
                 Studying{' '}
                 <span className={`font-semibold ${getA(activeSubj.accent).label}`}>
                   {activeSubj.icon} {activeSubj.name}
@@ -355,53 +353,53 @@ export default function LiveView() {
             </div>
           )}
           {!running && displaySecs > 0 && (
-            <p className="text-xs text-slate-600 mt-3">Session paused</p>
+            <p className="text-xs text-slate-600 mt-2">Session paused</p>
           )}
           {!running && displaySecs === 0 && (
-            <p className="text-xs text-slate-600 mt-3">Start the timer on the main dashboard</p>
+            <p className="text-xs text-slate-600 mt-2">Start the timer on the main dashboard</p>
           )}
 
-          {/* Quick stats */}
-          <div className="mt-5 flex items-center justify-center gap-3 flex-wrap">
-            <StatPill
-              label="Focus today"
+          {/* Quick stats — 4 equal pills in a row */}
+          <div className="mt-4 flex gap-2">
+            <StatBox
+              label="Focus"
               value={displaySecs > 0 ? fmtSecs(displaySecs) : '—'}
               color={displaySecs > 0 ? 'text-indigo-300' : 'text-slate-600'}
             />
-            <StatPill
-              label="Content today"
+            <StatBox
+              label="Content"
               value={totalContentToday > 0 ? fmtMins(totalContentToday) : '—'}
               color={totalContentToday > 0 ? 'text-emerald-300' : 'text-slate-600'}
             />
-            <StatPill
-              label="Lectures today"
+            <StatBox
+              label="Lectures"
               value={totalLectureToday || '—'}
               color="text-violet-300"
             />
             {streak > 0 && (
-              <StatPill label="Streak" value={`${streak}d 🔥`} color="text-amber-300" />
+              <StatBox label="Streak" value={`${streak}🔥`} color="text-amber-300" />
             )}
           </div>
         </div>
 
-        {/* Combined daily goal — only when 2+ subjects with goals were studied */}
+        {/* ── Combined daily goal ────────────────────────────────── */}
         {showCombined && (
           <div className={`rounded-2xl border p-4 transition-colors ${
             combinedMet ? 'border-emerald-500/25 bg-emerald-500/5' : 'border-slate-800 bg-slate-900/30'
           }`}>
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Target size={14} className={combinedMet ? 'text-emerald-400' : 'text-amber-400'} />
-                <span className="text-xs font-semibold uppercase tracking-widest text-slate-400">
-                  Combined Daily Goal
+            <div className="flex items-center justify-between mb-2.5 gap-2">
+              <div className="flex items-center gap-1.5 min-w-0">
+                <Target size={12} className={`flex-shrink-0 ${combinedMet ? 'text-emerald-400' : 'text-amber-400'}`} />
+                <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 truncate">
+                  Combined Goal
                 </span>
-                <span className="text-[10px] text-slate-600">
+                <span className="text-[9px] text-slate-600 flex-shrink-0">
                   ({studiedWithGoal.map(s => s.shortName).join(' + ')})
                 </span>
               </div>
-              <span className={`text-xs font-bold font-mono ${combinedMet ? 'text-emerald-400' : 'text-slate-400'}`}>
+              <span className={`text-[10px] font-bold font-mono flex-shrink-0 ${combinedMet ? 'text-emerald-400' : 'text-slate-400'}`}>
                 {combinedMet
-                  ? `✓ ${fmtMins(combinedContent)} — Done!`
+                  ? `✓ Done!`
                   : `${fmtMins(combinedContent)} / ${fmtMins(combinedGoalMins)}`}
               </span>
             </div>
@@ -414,28 +412,29 @@ export default function LiveView() {
               }
               height="h-2.5"
             />
-            <div className="flex justify-between mt-1.5">
-              <span className="text-[10px] text-slate-600 font-mono">{combinedPct.toFixed(0)}% complete</span>
+            <div className="flex justify-between mt-1">
+              <span className="text-[9px] text-slate-600 font-mono">{combinedPct.toFixed(0)}%</span>
               {!combinedMet && (
-                <span className="text-[10px] text-slate-600 font-mono">
-                  {fmtMins(Math.max(combinedGoalMins - combinedContent, 0))} remaining
+                <span className="text-[9px] text-slate-600 font-mono">
+                  {fmtMins(Math.max(combinedGoalMins - combinedContent, 0))} left
                 </span>
               )}
             </div>
           </div>
         )}
 
-        {/* Subject cards — adaptive: only show studied subjects */}
+        {/* ── Subject cards ──────────────────────────────────────── */}
         {studiedSubjects.length > 0 ? (
           <div>
             <div className="flex items-center gap-2 mb-3">
-              <Zap size={13} className="text-slate-500" />
-              <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
+              <Zap size={12} className="text-slate-500 flex-shrink-0" />
+              <h2 className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
                 {studiedSubjects.length === 1 ? studiedSubjects[0].name : 'Subject Breakdown'}
               </h2>
               <div className="flex-1 h-px bg-slate-800" />
             </div>
-            <div className={`grid gap-4 ${studiedSubjects.length === 1 ? 'grid-cols-1' : 'grid-cols-1 sm:grid-cols-2'}`}>
+            {/* Always single column on mobile, 2-col on sm+ when multiple */}
+            <div className={`grid gap-3 ${studiedSubjects.length > 1 ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-1'}`}>
               {studiedSubjects.map(subj => (
                 <SubjectCard
                   key={subj.id}
@@ -449,23 +448,23 @@ export default function LiveView() {
           </div>
         ) : (
           <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-8 text-center">
-            <p className="text-3xl mb-3">📚</p>
-            <p className="text-sm text-slate-400 font-medium">No study activity yet today</p>
+            <p className="text-3xl mb-2">📚</p>
+            <p className="text-sm text-slate-400 font-medium">No activity yet today</p>
             <p className="text-xs text-slate-600 mt-1">
-              Start the timer or tick off a lecture on the main dashboard
+              Start the timer or tick a lecture on the main dashboard
             </p>
           </div>
         )}
 
-        {/* All-course progress — always shown */}
+        {/* ── All-course progress ────────────────────────────────── */}
         <div className="rounded-2xl border border-slate-800 bg-slate-900/30 p-4">
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <TrendingUp size={13} className="text-slate-500" />
-              <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-500">All-Course Progress</h2>
+            <div className="flex items-center gap-1.5">
+              <TrendingUp size={12} className="text-slate-500" />
+              <h2 className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">All-Course Progress</h2>
             </div>
-            <span className="text-xs font-bold font-mono text-slate-400">
-              {totalAllDone} / {totalAllLectures} lectures
+            <span className="text-[10px] font-bold font-mono text-slate-400">
+              {totalAllDone}/{totalAllLectures}
             </span>
           </div>
 
@@ -478,11 +477,12 @@ export default function LiveView() {
               const ac    = getA(subj.accent);
               return (
                 <div key={subj.id}>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="flex items-center gap-1.5 text-xs text-slate-400">
-                      <span>{subj.icon}</span> {subj.shortName}
+                  <div className="flex items-center justify-between mb-1 gap-2">
+                    <span className="flex items-center gap-1.5 text-xs text-slate-400 min-w-0 truncate">
+                      <span className="flex-shrink-0">{subj.icon}</span>
+                      <span className="truncate">{subj.shortName}</span>
                     </span>
-                    <span className={`text-[10px] font-mono font-semibold ${ac.label}`}>
+                    <span className={`text-[9px] font-mono font-semibold flex-shrink-0 ${ac.label}`}>
                       {done}/{total} · {pct.toFixed(1)}%
                     </span>
                   </div>
@@ -494,8 +494,8 @@ export default function LiveView() {
 
           <div className="border-t border-slate-800 pt-3">
             <div className="flex items-center justify-between mb-1.5">
-              <span className="text-[10px] text-slate-600 uppercase tracking-wider">Combined</span>
-              <span className="text-[10px] font-mono text-slate-500">{totalAllPct.toFixed(1)}%</span>
+              <span className="text-[9px] text-slate-600 uppercase tracking-wider">Combined</span>
+              <span className="text-[9px] font-mono text-slate-500">{totalAllPct.toFixed(1)}%</span>
             </div>
             <ProgressBar
               pct={totalAllPct}
@@ -505,13 +505,11 @@ export default function LiveView() {
           </div>
         </div>
 
-        {/* Footer */}
-        <footer className="pb-6 text-center">
-          <p className="text-[10px] text-slate-700 font-mono">
-            Live via Firebase · auto-refreshes
-            {stats?.updatedAt && ` · last push ${updatedLabel(stats.updatedAt)}`}
-          </p>
-        </footer>
+        {/* ── Footer ────────────────────────────────────────────── */}
+        <p className="text-center text-[9px] text-slate-700 font-mono pb-2">
+          Live via Firebase
+          {stats?.updatedAt && ` · ${updatedLabel(stats.updatedAt)}`}
+        </p>
       </main>
     </div>
   );
