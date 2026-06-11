@@ -878,6 +878,130 @@ function StudyHistory({ mergedHistory, subjectSettings }) {
   );
 }
 
+/* ═══════════════════════════════════════════════════════════════/* ═══════════════════════════════════════════════════════════════
+   COMPONENT: SubjectSwitcherModal
+   ─────────────────────────────────────────────────────────────
+   Opens as an overlay when the user clicks “Switch Subject”.
+   RULE: subject switching is BLOCKED while the timer is running.
+         The user must pause the timer first — this ensures study
+         time is always attributed to the correct subject.
+═══════════════════════════════════════════════════════════════ */
+function SubjectSwitcherModal({ allSubjectsData, subjectSettings, activeSubjectId, timerRunning, onSwitch, onClose }) {
+  // Close on backdrop click
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgba(0,0,0,0.65)' }}
+      onClick={onClose}
+    >
+      <div
+        className="bg-slate-900 border border-slate-700/60 rounded-2xl w-full max-w-sm shadow-2xl flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 pt-5 pb-4 border-b border-slate-800">
+          <div>
+            <h2 className="text-sm font-bold text-slate-100">Switch Subject</h2>
+            <p className="text-[11px] text-slate-500 mt-0.5">Select what you’re studying</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-7 h-7 flex items-center justify-center rounded-lg text-slate-500 hover:text-slate-200 hover:bg-slate-800 transition-colors"
+          >
+            ✕
+          </button>
+        </div>
+
+        {/* Timer-running warning */}
+        {timerRunning && (
+          <div className="mx-5 mt-4 px-4 py-3 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-start gap-2.5">
+            <span className="text-amber-400 text-base leading-none mt-0.5">⚠️</span>
+            <div>
+              <p className="text-xs font-semibold text-amber-300">Timer is running</p>
+              <p className="text-[11px] text-amber-400/70 mt-0.5 leading-snug">
+                Pause the timer first so your study time is correctly attributed to the right subject.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Subject list */}
+        <div className="p-5 space-y-2.5 max-h-96 overflow-y-auto">
+          {SUBJECT_LIST.map(subj => {
+            const sd       = allSubjectsData[subj.id] || {};
+            const done     = sd.completedIds?.size ?? 0;
+            const total    = subj.lectures.length;
+            const pct      = total > 0 ? (done / total) * 100 : 0;
+            const isActive = subj.id === activeSubjectId;
+            const goal     = subjectSettings[subj.id]?.dailyGoalMins ?? subj.defaultDailyGoalMins;
+            const ac       = ACCENT[subj.accent] || ACCENT.indigo;
+            const locked   = timerRunning || isActive;
+
+            return (
+              <button
+                key={subj.id}
+                onClick={() => { if (!locked) { onSwitch(subj.id); onClose(); } }}
+                disabled={locked}
+                className={`w-full text-left p-4 rounded-xl border transition-all duration-200 ${
+                  isActive
+                    ? `${ac.tab.replace('bg-', 'bg-').replace('/20', '/15')} border-opacity-50 cursor-default`
+                    : timerRunning
+                    ? 'border-slate-800 bg-slate-800/30 opacity-40 cursor-not-allowed'
+                    : 'border-slate-800 bg-slate-800/20 hover:border-slate-600 hover:bg-slate-800/50 cursor-pointer'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">{subj.icon}</span>
+                    <div>
+                      <p className={`text-sm font-semibold leading-none ${
+                        isActive ? ac.text : 'text-slate-200'
+                      }`}>{subj.name}</p>
+                      {isActive && (
+                        <p className="text-[10px] text-slate-500 mt-0.5">Currently active</p>
+                      )}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <p className={`text-xs font-mono font-bold ${ac.text}`}>{done}/{total}</p>
+                    {goal > 0 && (
+                      <p className="text-[10px] text-slate-500 mt-0.5">{fmtMins(goal)}/day goal</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Course progress bar */}
+                <div className="h-1.5 bg-slate-900 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${pct}%`,
+                      background: pct === 100
+                        ? 'linear-gradient(90deg,#10b981,#34d399)'
+                        : (ACCENT[subj.accent]?.text === 'text-violet-300'
+                          ? 'linear-gradient(90deg,#7c3aed,#c4b5fd)'
+                          : 'linear-gradient(90deg,#6366f1,#a78bfa)'),
+                    }}
+                  />
+                </div>
+                <p className="text-[10px] text-slate-600 font-mono mt-1">{pct.toFixed(1)}% complete</p>
+              </button>
+            );
+          })}
+        </div>
+
+        {timerRunning && (
+          <div className="px-5 pb-5">
+            <p className="text-center text-[11px] text-slate-600">
+              Pause the timer on the dashboard, then switch subject.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════════
    APP ROOT
 ═══════════════════════════════════════════════════════════════ */
@@ -891,6 +1015,9 @@ export default function App() {
   const TOTAL_MINS     = useMemo(() => lectureList.reduce((s, l) => s + l.duration, 0), [activeSubjectId]);
   const SECTIONS       = useMemo(() => groupBySection(lectureList), [activeSubjectId]);
   const LECTURE_MAP    = useMemo(() => Object.fromEntries(lectureList.map(l => [l.id, l])), [activeSubjectId]);
+
+  // ── Subject switcher modal ────────────────────────────────────
+  const [showSwitcher, setShowSwitcher] = useState(false);
 
   // ── Subject goal settings ─────────────────────────────────────
   const [subjectSettings, setSubjectSettings] = useState(() => ls(K.SUBJECT_SETTINGS, {}));
@@ -1325,7 +1452,7 @@ export default function App() {
 
       {/* Sticky Header */}
       <header className="sticky top-0 z-50 border-b border-slate-800/80 bg-slate-950/80 backdrop-blur-xl">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-4">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
           {/* Logo */}
           <div className="flex items-center gap-2.5 flex-shrink-0">
             <div className="w-7 h-7 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center">
@@ -1337,32 +1464,30 @@ export default function App() {
             </div>
           </div>
 
-          {/* Subject Tab Switcher */}
-          <div className="flex items-center gap-1.5 flex-1 overflow-x-auto scrollbar-none">
-            {SUBJECT_LIST.map(subj => {
-              const isActive = subj.id === activeSubjectId;
-              const subjData = allSubjectsData[subj.id] || {};
-              const done     = subjData.completedIds?.size ?? 0;
-              const total    = subj.lectures.length;
-              const ac       = ACCENT[subj.accent] || ACCENT.indigo;
-              return (
-                <button
-                  key={subj.id}
-                  onClick={() => switchSubject(subj.id)}
-                  className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all duration-200 whitespace-nowrap ${
-                    isActive
-                      ? `${ac.tab} shadow-sm`
-                      : 'text-slate-500 border-slate-800 hover:text-slate-300 hover:border-slate-700 bg-transparent'
-                  }`}
-                >
-                  <span>{subj.icon}</span>
-                  <span>{subj.shortName}</span>
-                  <span className={`font-mono text-[10px] ${isActive ? 'opacity-70' : 'opacity-40'}`}>
-                    {done}/{total}
-                  </span>
-                </button>
-              );
-            })}
+          {/* Active subject chip */}
+          <div className="flex-1 flex items-center gap-2">
+            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-xs font-semibold ${
+              (ACCENT[activeSubject.accent] || ACCENT.indigo).tab
+            }`}>
+              <span>{activeSubject.icon}</span>
+              <span>{activeSubject.shortName}</span>
+              <span className="font-mono opacity-60 text-[10px]">
+                {(allSubjectsData[activeSubjectId]?.completedIds?.size ?? 0)}/{activeSubject.lectures.length}
+              </span>
+              {timerRunning && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              )}
+            </div>
+
+            {/* Switch Subject button */}
+            <button
+              onClick={() => setShowSwitcher(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-slate-400 border border-slate-700/60 hover:text-slate-200 hover:border-slate-600 hover:bg-slate-800/50 transition-all duration-200"
+              title={timerRunning ? 'Pause timer to switch subjects' : 'Switch subject'}
+            >
+              <ChevronDown size={12} />
+              <span className="hidden sm:inline">Switch</span>
+            </button>
           </div>
 
           {/* Right: streak + progress dot */}
@@ -1379,6 +1504,18 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Subject Switcher Modal */}
+      {showSwitcher && (
+        <SubjectSwitcherModal
+          allSubjectsData={allSubjectsData}
+          subjectSettings={subjectSettings}
+          activeSubjectId={activeSubjectId}
+          timerRunning={timerRunning}
+          onSwitch={switchSubject}
+          onClose={() => setShowSwitcher(false)}
+        />
+      )}
 
       <main className="max-w-6xl mx-auto px-4 py-6 space-y-6">
 
