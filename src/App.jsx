@@ -105,11 +105,18 @@ function initTimer() {
 function initDailyStudy() {
   const ds    = { ...ls(K.DAILY_STUDY, {}) };
   const saved = ls(K.TIMER, {});
-  if (saved.sessionStartTs && saved.lastSavedTs) {
-    const awaySeconds = Math.max(0, Math.floor((Date.now() - saved.lastSavedTs) / 1000));
-    if (awaySeconds > 0) {
-      const today = todayISO();
-      ds[today]   = (ds[today] ?? 0) + awaySeconds;
+  // Use sessionStartTs (wall-clock anchor) — NOT lastSavedTs.
+  // lastSavedTs is unreliable: browsers throttle setInterval in background
+  // tabs (sometimes to 1/min), so lastSavedTs can be many seconds behind
+  // even though the timer kept running.
+  // sessionStartTs is set once when the session starts and never changes
+  // until stop — so (Date.now() - sessionStartTs) is always accurate.
+  if (saved.sessionStartTs) {
+    const today       = todayISO();
+    const trueElapsed = Math.max(0, Math.floor((Date.now() - saved.sessionStartTs) / 1000));
+    // Only advance, never go backwards
+    if (trueElapsed > (ds[today] ?? 0)) {
+      ds[today] = trueElapsed;
       ss(K.DAILY_STUDY, ds);
     }
   }
@@ -1266,17 +1273,21 @@ export default function App() {
       const savedSubjDs     = gv.subjectDailyStudy || {};
       const savedSettings   = settingsSnap.exists() ? settingsSnap.val() : {};
 
-      // Reconcile away-time if timer was running
-      if (savedTimer.sessionStartTs && savedTimer.lastSavedTs) {
-        const away = Math.max(0, Math.floor((Date.now() - savedTimer.lastSavedTs) / 1000));
-        if (away > 0) {
-          const today = todayISO();
-          savedDailyStudy = { ...savedDailyStudy, [today]: (savedDailyStudy[today] ?? 0) + away };
+      // Reconcile timer using sessionStartTs — the wall-clock anchor.
+      // DO NOT use lastSavedTs: background-tab throttling means setInterval
+      // (and therefore persistTimer) may not have fired for 60+ seconds even
+      // while the timer was running, making lastSavedTs stale and away-time
+      // calculations too low.
+      const today = todayISO();
+      if (savedTimer.sessionStartTs) {
+        const trueElapsed = Math.max(0, Math.floor((Date.now() - savedTimer.sessionStartTs) / 1000));
+        // Advance today's total to the true elapsed — never go backwards
+        if (trueElapsed > (savedDailyStudy[today] ?? 0)) {
+          savedDailyStudy = { ...savedDailyStudy, [today]: trueElapsed };
         }
       }
 
       // Force elapsed = today's total
-      const today     = todayISO();
       const todaySecs = savedDailyStudy[today] || 0;
       const calcTimer = {
         sessionElapsed:  todaySecs,
@@ -1395,8 +1406,20 @@ export default function App() {
       };
     });
 
+    // Compute todayStudySeconds from the wall-clock anchor (sessionStartTs)
+    // rather than from dailyStudyRef. When this tab is in the background,
+    // the browser throttles setInterval, so dailyStudyRef.current stops
+    // incrementing — but sessionStartTs never changes. This means LiveView
+    // always receives the TRUE current time, preventing the oscillation loop
+    // where LiveView counted up locally then got reset by a stale Firebase push.
+    const timerPayload = ls(K.TIMER, {});
+    const storedToday  = dailyStudyRef.current[today] || 0;
+    const trueToday    = (timerPayload.sessionStartTs && timerRunningRef.current)
+      ? Math.max(storedToday, Math.floor((Date.now() - timerPayload.sessionStartTs) / 1000))
+      : storedToday;
+
     set(ref(db, 'users/rahul/liveStats'), {
-      todayStudySeconds: dailyStudyRef.current[today] || 0,
+      todayStudySeconds: trueToday,
       timerRunning:      timerRunningRef.current,
       activeSubject:     activeSubjectIdRef.current,
       streak:            streakRef.current,
