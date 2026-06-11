@@ -438,6 +438,19 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
   };
 
 
+  // ── Confirm-reset state (two-step: click once to arm, again to confirm) ──
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  // Arm or disarm the reset confirmation
+  const armReset = () => {
+    if (running) { setConfirmReset('blocked'); return; }
+    setConfirmReset(true);
+  };
+  const doReset = () => {
+    setConfirmReset(false);
+    reset();
+  };
+
   if (editMode) {
     return (
       <div className="rounded-xl border border-slate-700/60 bg-slate-800/40 p-5 flex flex-col gap-4">
@@ -503,28 +516,63 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
         </p>
       </div>
 
-      {/* Buttons */}
-      <div className="flex gap-2">
-        <button
-          id="timer-toggle"
-          onClick={toggle}
-          className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 ${
-            running
-              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30'
-              : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30'
-          }`}
-        >
-          {running ? <Pause size={14} /> : <Play size={14} />}
-          {running ? 'Pause' : 'Start'}
-        </button>
-        <button
-          id="timer-reset"
-          onClick={reset}
-          className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg text-sm font-semibold text-slate-500 border border-slate-700/60 hover:bg-slate-700/40 hover:text-slate-300 transition-all duration-200"
-        >
-          <RotateCcw size={14} />
-        </button>
-      </div>
+      {/* Confirm-reset banner */}
+      {confirmReset === 'blocked' && (
+        <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-xs">
+          <span className="text-amber-400 text-sm leading-none mt-0.5">⚠️</span>
+          <div className="flex-1">
+            <p className="text-amber-300 font-semibold">Timer is running</p>
+            <p className="text-amber-400/70 mt-0.5 leading-snug">Pause the timer before resetting today's progress.</p>
+          </div>
+          <button onClick={() => setConfirmReset(false)} className="text-slate-500 hover:text-slate-300 transition-colors mt-0.5">✕</button>
+        </div>
+      )}
+      {confirmReset === true && (
+        <div className="flex flex-col gap-2 px-3 py-2.5 rounded-lg bg-rose-500/10 border border-rose-500/25">
+          <p className="text-xs font-semibold text-rose-300">Reset today's study time?</p>
+          <p className="text-[11px] text-rose-400/70 leading-snug">This will zero today's timer and all subject study time. This cannot be undone.</p>
+          <div className="flex gap-2 mt-1">
+            <button
+              onClick={doReset}
+              className="flex-1 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/30 hover:bg-rose-500/30 transition-all"
+            >
+              Yes, reset
+            </button>
+            <button
+              onClick={() => setConfirmReset(false)}
+              className="flex-1 py-1.5 rounded-lg text-xs font-semibold text-slate-400 border border-slate-700/60 hover:bg-slate-700/40 transition-all"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Main controls */}
+      {confirmReset === false && (
+        <div className="flex gap-2">
+          <button
+            id="timer-toggle"
+            onClick={toggle}
+            className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 ${
+              running
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30'
+                : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 hover:bg-indigo-500/30'
+            }`}
+          >
+            {running ? <Pause size={14} /> : <Play size={14} />}
+            {running ? 'Pause' : 'Start'}
+          </button>
+          <button
+            id="timer-reset"
+            onClick={armReset}
+            className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-lg text-sm font-semibold text-slate-500 border border-slate-700/60 hover:bg-slate-700/40 hover:text-slate-300 transition-all duration-200"
+            title="Reset today's study time"
+          >
+            <RotateCcw size={14} />
+          </button>
+        </div>
+      )}
 
       {/* Subtle adjust link */}
       <div className="text-center">
@@ -1003,15 +1051,18 @@ function StudyHistory({ mergedHistory, subjectSettings }) {
   );
 }
 
-/* ═══════════════════════════════════════════════════════════════/* ═══════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════════════
    COMPONENT: SubjectSwitcherModal
    ─────────────────────────────────────────────────────────────
-   Opens as an overlay when the user clicks “Switch Subject”.
+   Opens as an overlay when the user clicks "Switch Subject".
    RULE: subject switching is BLOCKED while the timer is running.
          The user must pause the timer first — this ensures study
          time is always attributed to the correct subject.
 ═══════════════════════════════════════════════════════════════ */
-function SubjectSwitcherModal({ allSubjectsData, subjectSettings, activeSubjectId, timerRunning, onSwitch, onClose }) {
+function SubjectSwitcherModal({ allSubjectsData, subjectDailyStudy, subjectSettings, activeSubjectId, timerRunning, onSwitch, onClose, onResetSubjectToday }) {
+  const [confirmResetId, setConfirmResetId] = useState(null);
+  const today = todayISO();
+
   // Close on backdrop click
   return (
     <div
@@ -1027,7 +1078,7 @@ function SubjectSwitcherModal({ allSubjectsData, subjectSettings, activeSubjectI
         <div className="flex items-center justify-between px-5 pt-5 pb-4 border-b border-slate-800">
           <div>
             <h2 className="text-sm font-bold text-slate-100">Switch Subject</h2>
-            <p className="text-[11px] text-slate-500 mt-0.5">Select what you’re studying</p>
+            <p className="text-[11px] text-slate-500 mt-0.5">Select what you're studying</p>
           </div>
           <button
             onClick={onClose}
@@ -1051,66 +1102,112 @@ function SubjectSwitcherModal({ allSubjectsData, subjectSettings, activeSubjectI
         )}
 
         {/* Subject list */}
-        <div className="p-5 space-y-2.5 max-h-96 overflow-y-auto">
+        <div className="p-5 space-y-2.5 max-h-[70vh] overflow-y-auto">
           {SUBJECT_LIST.map(subj => {
-            const sd       = allSubjectsData[subj.id] || {};
-            const done     = sd.completedIds?.size ?? 0;
-            const total    = subj.lectures.length;
-            const pct      = total > 0 ? (done / total) * 100 : 0;
-            const isActive = subj.id === activeSubjectId;
-            const goal     = subjectSettings[subj.id]?.dailyGoalMins ?? subj.defaultDailyGoalMins;
-            const ac       = ACCENT[subj.accent] || ACCENT.indigo;
-            const locked   = timerRunning || isActive;
+            const sd            = allSubjectsData[subj.id] || {};
+            const done          = sd.completedIds?.size ?? 0;
+            const total         = subj.lectures.length;
+            const pct           = total > 0 ? (done / total) * 100 : 0;
+            const isActive      = subj.id === activeSubjectId;
+            const goal          = subjectSettings[subj.id]?.dailyGoalMins ?? subj.defaultDailyGoalMins;
+            const ac            = ACCENT[subj.accent] || ACCENT.indigo;
+            const locked        = timerRunning || isActive;
+            const todayStudySecs = subjectDailyStudy?.[today]?.[subj.id] || 0;
+            const isConfirming  = confirmResetId === subj.id;
 
             return (
-              <button
-                key={subj.id}
-                onClick={() => { if (!locked) { onSwitch(subj.id); onClose(); } }}
-                disabled={locked}
-                className={`w-full text-left p-4 rounded-xl border transition-all duration-200 ${
-                  isActive
-                    ? `${ac.tab.replace('bg-', 'bg-').replace('/20', '/15')} border-opacity-50 cursor-default`
-                    : timerRunning
-                    ? 'border-slate-800 bg-slate-800/30 opacity-40 cursor-not-allowed'
-                    : 'border-slate-800 bg-slate-800/20 hover:border-slate-600 hover:bg-slate-800/50 cursor-pointer'
-                }`}
-              >
-                <div className="flex items-center justify-between mb-2.5">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xl">{subj.icon}</span>
-                    <div>
-                      <p className={`text-sm font-semibold leading-none ${
-                        isActive ? ac.text : 'text-slate-200'
-                      }`}>{subj.name}</p>
-                      {isActive && (
-                        <p className="text-[10px] text-slate-500 mt-0.5">Currently active</p>
+              <div key={subj.id}>
+                <button
+                  onClick={() => { if (!locked) { onSwitch(subj.id); onClose(); } }}
+                  disabled={locked}
+                  className={`w-full text-left p-4 rounded-xl border transition-all duration-200 ${
+                    isActive
+                      ? `${ac.tab.replace('bg-', 'bg-').replace('/20', '/15')} border-opacity-50 cursor-default`
+                      : timerRunning
+                      ? 'border-slate-800 bg-slate-800/30 opacity-40 cursor-not-allowed'
+                      : 'border-slate-800 bg-slate-800/20 hover:border-slate-600 hover:bg-slate-800/50 cursor-pointer'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-2.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xl">{subj.icon}</span>
+                      <div>
+                        <p className={`text-sm font-semibold leading-none ${
+                          isActive ? ac.text : 'text-slate-200'
+                        }`}>{subj.name}</p>
+                        {isActive && (
+                          <p className="text-[10px] text-slate-500 mt-0.5">Currently active</p>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {/* Today's study time badge + per-subject reset */}
+                      {todayStudySecs > 0 && (
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-[10px] font-mono font-semibold ${
+                            isActive ? ac.text : 'text-slate-500'
+                          }`}>
+                            {fmtSecs(todayStudySecs)} today
+                          </span>
+                          {!timerRunning && (
+                            <button
+                              onClick={e => { e.stopPropagation(); setConfirmResetId(subj.id); }}
+                              className="text-slate-700 hover:text-rose-400 transition-colors"
+                              title={`Reset today's time for ${subj.name}`}
+                            >
+                              <RotateCcw size={11} />
+                            </button>
+                          )}
+                        </div>
                       )}
+                      <div className="text-right">
+                        <p className={`text-xs font-mono font-bold ${ac.text}`}>{done}/{total}</p>
+                        {goal > 0 && (
+                          <p className="text-[10px] text-slate-500 mt-0.5">{fmtMins(goal)}/day goal</p>
+                        )}
+                      </div>
                     </div>
                   </div>
-                  <div className="text-right">
-                    <p className={`text-xs font-mono font-bold ${ac.text}`}>{done}/{total}</p>
-                    {goal > 0 && (
-                      <p className="text-[10px] text-slate-500 mt-0.5">{fmtMins(goal)}/day goal</p>
-                    )}
-                  </div>
-                </div>
 
-                {/* Course progress bar */}
-                <div className="h-1.5 bg-slate-900 rounded-full overflow-hidden">
-                  <div
-                    className="h-full rounded-full transition-all duration-500"
-                    style={{
-                      width: `${pct}%`,
-                      background: pct === 100
-                        ? 'linear-gradient(90deg,#10b981,#34d399)'
-                        : (ACCENT[subj.accent]?.text === 'text-violet-300'
-                          ? 'linear-gradient(90deg,#7c3aed,#c4b5fd)'
-                          : 'linear-gradient(90deg,#6366f1,#a78bfa)'),
-                    }}
-                  />
-                </div>
-                <p className="text-[10px] text-slate-600 font-mono mt-1">{pct.toFixed(1)}% complete</p>
-              </button>
+                  {/* Course progress bar */}
+                  <div className="h-1.5 bg-slate-900 rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all duration-500"
+                      style={{
+                        width: `${pct}%`,
+                        background: pct === 100
+                          ? 'linear-gradient(90deg,#10b981,#34d399)'
+                          : (ACCENT[subj.accent]?.text === 'text-violet-300'
+                            ? 'linear-gradient(90deg,#7c3aed,#c4b5fd)'
+                            : 'linear-gradient(90deg,#6366f1,#a78bfa)'),
+                      }}
+                    />
+                  </div>
+                  <p className="text-[10px] text-slate-600 font-mono mt-1">{pct.toFixed(1)}% complete</p>
+                </button>
+
+                {/* Inline confirmation for per-subject reset */}
+                {isConfirming && (
+                  <div className="mt-1.5 px-3 py-2.5 rounded-xl bg-rose-500/10 border border-rose-500/25 flex flex-col gap-2">
+                    <p className="text-xs font-semibold text-rose-300">Reset {subj.name}'s time today?</p>
+                    <p className="text-[11px] text-rose-400/70 leading-snug">This removes today's focus timer for this subject only. Other data is untouched.</p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => { onResetSubjectToday(subj.id); setConfirmResetId(null); }}
+                        className="flex-1 py-1.5 rounded-lg text-xs font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/30 hover:bg-rose-500/30 transition-all"
+                      >
+                        Yes, reset
+                      </button>
+                      <button
+                        onClick={() => setConfirmResetId(null)}
+                        className="flex-1 py-1.5 rounded-lg text-xs font-semibold text-slate-400 border border-slate-700/60 hover:bg-slate-700/40 transition-all"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             );
           })}
         </div>
@@ -1583,26 +1680,48 @@ export default function App() {
 
   // handleTimerAdjust: called when user edits the timer display.
   // Accepts newElapsed (seconds) directly — not a delta in minutes.
-  // Setting dailyStudy[today] = newElapsed is exact (no rounding error).
-  // Also pushes liveStats immediately so LiveView updates without needing
-  // the user to press play (previously liveStats only updated on timerRunning
-  // change, leaving LiveView stale after an adjustment while paused).
+  // Sets dailyStudy[today] = newElapsed (exact, no rounding error).
+  // Also sets subjectDailyStudy[today][activeSubject] = newElapsed so that
+  // the LiveView shows correct per-subject focus time after an adjustment
+  // (previously it showed 0 for subjects even after adjusting timer).
   const handleTimerAdjust = useCallback((newElapsed) => {
     if (dailyStudyRef.current == null) return;
-    const today  = todayISO();
-    // Set directly to newElapsed — the new elapsed IS the new daily total
-    const nextDs = { ...dailyStudyRef.current, [today]: Math.max(0, newElapsed) };
+    const today    = todayISO();
+    const clamped  = Math.max(0, newElapsed);
+
+    // --- Global daily study ---
+    const nextDs = { ...dailyStudyRef.current, [today]: clamped };
     dailyStudyRef.current = nextDs;
     ss(K.DAILY_STUDY, nextDs);
     set(ref(db, 'users/rahul/global/dailyStudy'), nextDs).catch(console.error);
     setDailyStudy(nextDs);
-    // Also update subjectSwitchBase so subject credit doesn't count
-    // the adjusted-away seconds as study time for the active subject
-    subjectSwitchBaseRef.current = Math.max(0, newElapsed);
+
+    // --- Active subject daily study ---
+    // Credit the full adjusted elapsed to the currently active subject.
+    // Other subjects keep their existing times but are capped so they
+    // don't exceed the new global total (prevents impossible states).
+    const activeId  = activeSubjectIdRef.current;
+    const existing  = subjectDailyStudyRef.current[today] || {};
+    const otherTotal = Object.entries(existing)
+      .filter(([id]) => id !== activeId)
+      .reduce((sum, [, s]) => sum + s, 0);
+    const activeAllotted = Math.max(0, clamped - otherTotal);
+    const nextSDs = {
+      ...subjectDailyStudyRef.current,
+      [today]: { ...existing, [activeId]: activeAllotted },
+    };
+    subjectDailyStudyRef.current = nextSDs;
+    ss(K.SUBJECT_DAILY_STUDY, nextSDs);
+    set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
+    setSubjectDailyStudy(nextSDs);
+
+    // Reset switch base so next subject credit starts from the new total
+    subjectSwitchBaseRef.current = clamped;
+
     // Push liveStats right away so LiveView reflects the new time
-    // without waiting for the next timerRunning toggle.
     pushLiveStatsRef.current?.();
   }, []);
+
 
 
   // ── Timer reset — zeros today's study time completely ─────────
@@ -1622,7 +1741,22 @@ export default function App() {
     subjectSwitchBaseRef.current = 0;
   }, []);
 
-  // ── Subject switch ─────────────────────────────────────────────
+  // ── Per-subject today reset ───────────────────────────────────
+  const handleResetSubjectToday = useCallback((subjectId) => {
+    const today    = todayISO();
+    const existing = subjectDailyStudyRef.current[today] || {};
+    const nextSDs  = {
+      ...subjectDailyStudyRef.current,
+      [today]: { ...existing, [subjectId]: 0 },
+    };
+    subjectDailyStudyRef.current = nextSDs;
+    ss(K.SUBJECT_DAILY_STUDY, nextSDs);
+    set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
+    setSubjectDailyStudy(nextSDs);
+    // Push liveStats so LiveView reflects the change immediately
+    pushLiveStatsRef.current?.();
+  }, []);
+
   const switchSubject = useCallback((newId) => {
     if (newId === activeSubjectId) return;
     const today    = todayISO();
@@ -1744,11 +1878,13 @@ export default function App() {
       {showSwitcher && (
         <SubjectSwitcherModal
           allSubjectsData={allSubjectsData}
+          subjectDailyStudy={subjectDailyStudy}
           subjectSettings={subjectSettings}
           activeSubjectId={activeSubjectId}
           timerRunning={timerRunning}
           onSwitch={switchSubject}
           onClose={() => setShowSwitcher(false)}
+          onResetSubjectToday={handleResetSubjectToday}
         />
       )}
 
