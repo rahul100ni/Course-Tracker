@@ -222,7 +222,9 @@ export default function LiveView() {
   const [stats, setStats]             = useState(null);
   const [loading, setLoading]         = useState(true);
   const [displaySecs, setDisplaySecs] = useState(0);
-  const snapshotBaseRef               = useRef({ secs: 0, ts: Date.now() });
+  // Per-subject live display secs: { [subjectId]: number }
+  const [displaySubjectSecs, setDisplaySubjectSecs] = useState({});
+  const snapshotBaseRef = useRef({ secs: 0, ts: Date.now(), switchBase: 0, subjects: {} });
 
   /* ── Firebase listener */
   useEffect(() => {
@@ -230,8 +232,23 @@ export default function LiveView() {
       const data = snap.val();
       if (data) {
         setStats(data);
-        snapshotBaseRef.current = { secs: data.todayStudySeconds ?? 0, ts: Date.now() };
-        setDisplaySecs(data.todayStudySeconds ?? 0);
+        const baseSecs    = data.todayStudySeconds ?? 0;
+        const switchBase  = data.subjectSwitchBase ?? baseSecs;
+        const subjSnap    = data.subjects ?? {};
+        snapshotBaseRef.current = {
+          secs:        baseSecs,
+          ts:          Date.now(),
+          switchBase,
+          subjects:    subjSnap,
+          activeSubject: data.activeSubject,
+        };
+        setDisplaySecs(baseSecs);
+        // Initialise per-subject display from the push
+        const initSubj = {};
+        Object.keys(subjSnap).forEach(id => {
+          initSubj[id] = subjSnap[id]?.todayStudySecs ?? 0;
+        });
+        setDisplaySubjectSecs(initSubj);
       }
       setLoading(false);
     });
@@ -242,16 +259,45 @@ export default function LiveView() {
   useEffect(() => {
     if (!stats?.timerRunning) return;
     const id = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - snapshotBaseRef.current.ts) / 1000);
-      setDisplaySecs(snapshotBaseRef.current.secs + elapsed);
+      const snap    = snapshotBaseRef.current;
+      const elapsed = Math.floor((Date.now() - snap.ts) / 1000);
+      const liveTot = snap.secs + elapsed;
+      setDisplaySecs(liveTot);
+
+      // Extrapolate active subject time
+      // liveExtra = how much the active subject has earned since the last push
+      // = (liveTotal - subjectSwitchBase)
+      // The push already included liveExtra at push-time; the snap.subjects[activeId].todayStudySecs
+      // is the value AT push time. So between pushes we only add the ADDITIONAL elapsed
+      // since the push: (elapsed) since snap.switchBase was already at liveTot at push time.
+      const activeId   = snap.activeSubject;
+      if (activeId) {
+        const baseSubjSecs = snap.subjects[activeId]?.todayStudySecs ?? 0;
+        const extraSinceSnap = elapsed; // 1s increments since the snapshot
+        setDisplaySubjectSecs(prev => ({
+          ...prev,
+          [activeId]: baseSubjSecs + extraSinceSnap,
+        }));
+      }
     }, 1000);
     return () => clearInterval(id);
   }, [stats?.timerRunning, stats?.updatedAt]);
 
+
   /* ── Derived values */
-  const subjects = stats?.subjects  ?? {};
-  const streak   = stats?.streak    ?? 0;
-  const running  = stats?.timerRunning ?? false;
+  const rawSubjects = stats?.subjects ?? {};
+  const streak      = stats?.streak   ?? 0;
+  const running     = stats?.timerRunning ?? false;
+  const activeSubjectId = stats?.activeSubject ?? null;
+
+  // Merge live-extrapolated subject secs into the subjects map
+  const subjects = {};
+  Object.entries(rawSubjects).forEach(([id, sd]) => {
+    subjects[id] = {
+      ...sd,
+      todayStudySecs: displaySubjectSecs[id] ?? sd?.todayStudySecs ?? 0,
+    };
+  });
 
   const studiedSubjects = SUBJECT_LIST.filter(s => {
     const sd = subjects[s.id];

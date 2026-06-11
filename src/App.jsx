@@ -1578,23 +1578,41 @@ export default function App() {
     // Compute todayStudySeconds from the wall-clock anchor (sessionStartTs)
     // rather than from dailyStudyRef. When this tab is in the background,
     // the browser throttles setInterval, so dailyStudyRef.current stops
-    // incrementing — but sessionStartTs never changes. This means LiveView
-    // always receives the TRUE current time, preventing the oscillation loop
-    // where LiveView counted up locally then got reset by a stale Firebase push.
+    // incrementing — but sessionStartTs never changes.
     const timerPayload = ls(K.TIMER, {});
     const storedToday  = dailyStudyRef.current[today] || 0;
     const trueToday    = (timerPayload.sessionStartTs && timerRunningRef.current)
       ? Math.max(storedToday, Math.floor((Date.now() - timerPayload.sessionStartTs) / 1000))
       : storedToday;
 
+    // ── Live subject credit ──────────────────────────────────────────────
+    // subjectDailyStudy is only written on subject switch / page hide.
+    // So while studying a subject, its recorded time is always stale (0 or
+    // last-credited value). Fix: compute the LIVE contribution of the active
+    // subject as (currentTotal - subjectSwitchBase) and add it to the push.
+    // Also send subjectSwitchBase so LiveView can re-extrapolate between pushes.
+    const activeId     = activeSubjectIdRef.current;
+    const switchBase   = subjectSwitchBaseRef.current ?? storedToday;
+    const liveExtra    = timerRunningRef.current ? Math.max(0, trueToday - switchBase) : 0;
+    if (liveExtra > 0 && activeId && subjects[activeId]) {
+      subjects[activeId] = {
+        ...subjects[activeId],
+        todayStudySecs: (subjects[activeId].todayStudySecs || 0) + liveExtra,
+      };
+    }
+
     set(ref(db, 'users/rahul/liveStats'), {
-      todayStudySeconds: trueToday,
-      timerRunning:      timerRunningRef.current,
-      activeSubject:     activeSubjectIdRef.current,
-      streak:            streakRef.current,
+      todayStudySeconds:   trueToday,
+      timerRunning:        timerRunningRef.current,
+      activeSubject:       activeId,
+      streak:              streakRef.current,
       subjects,
-      updatedAt:         new Date().toISOString(),
+      // subjectSwitchBase is sent so LiveView can extrapolate active-subject
+      // time between 30-second pushes (same technique as total-time extrapolation)
+      subjectSwitchBase:   switchBase,
+      updatedAt:           new Date().toISOString(),
     }).catch(err => console.error('liveStats push failed:', err));
+
   }, [firebaseLoaded]); // ← stable: data read from refs, not state closures
   // Ref so handleTimerAdjust can trigger an immediate push without being
   // a dep of pushLiveStats (which would break the stable callback).
