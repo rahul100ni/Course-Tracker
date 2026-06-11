@@ -17,10 +17,20 @@ const K = {
   SUBJECT_DAILY_STUDY: 'cst_v5_subject_daily_study',
   ACTIVE_SUBJECT:      'cst_v5_active_subject',
   SUBJECT_SETTINGS:    'cst_v5_subject_settings',
+  TIMER_OWNER_TAB:     'cst_v5_timer_owner_tab',   // for multi-tab leader election
   // Per-subject: cst_v5_{id}_completed  and  cst_v5_{id}_lecture_dates
   completed:    (id) => `cst_v5_${id}_completed`,
   lectureDates: (id) => `cst_v5_${id}_lecture_dates`,
 };
+
+// Unique ID for this browser tab (used for timer owner election)
+const TAB_ID = Math.random().toString(36).slice(2);
+
+// BroadcastChannel for cross-tab timer coordination
+// Only the "owner" tab runs setInterval; others just display.
+const TIMER_CH = typeof BroadcastChannel !== 'undefined'
+  ? new BroadcastChannel('cst_timer')
+  : null;
 
 /* ═══════════════════════════════════════════════════════════════
    PURE UTILITIES
@@ -215,15 +225,16 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
   const [running, setRunning] = useState(() => initTimer().running);
   const elapsedRef            = useRef(elapsed);
   const runningRef            = useRef(running);
-  const startTsRef            = useRef(null);          // wall-clock start
+  const startTsRef            = useRef(null);
   const firebaseInitSyncedRef = useRef(false);
-  const onTickRef             = useRef(onTick);        // always-current refs so the
-  const persistTimerStableRef = useRef(null);         //   interval closure never goes stale
+  const onTickRef             = useRef(onTick);
+  const persistTimerStableRef = useRef(null);
+  // Multi-tab: this tab owns the interval only if no other tab claimed it first
+  const isOwnerRef            = useRef(false);
 
-  // Keep onTick ref current
   useEffect(() => { onTickRef.current = onTick; }, [onTick]);
 
-  // ── persistTimer (stable, no closure over state) ─────────────
+  // ── persistTimer ─────────────────────────────────────────────
   const persistTimer = useCallback((el, run, startTs) => {
     const payload = run
       ? { sessionStartTs: startTs, sessionElapsed: el, lastSavedTs: Date.now() }
@@ -242,32 +253,70 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
     setElapsed(firebaseInitialElapsed);
   }, [firebaseInitialElapsed]);
 
-  // ── Interval managed entirely by useEffect (StrictMode-safe) ─
+  // ── Multi-tab: listen for ticks from the owner tab ───────────
   useEffect(() => {
-    if (!running) {
-      // Cleanup if interval is still running (e.g. after reset)
-      return;
-    }
-    // Compute startTs from current elapsed so resuming is seamless
+    if (!TIMER_CH) return;
+    const handler = (e) => {
+      if (e.data?.type === 'TICK' && !isOwnerRef.current) {
+        // Mirror the owner's elapsed so display stays in sync
+        elapsedRef.current = e.data.elapsed;
+        setElapsed(e.data.elapsed);
+      }
+      if (e.data?.type === 'OWNER_ALIVE') {
+        // Another tab is already the owner — we are NOT the owner
+        isOwnerRef.current = false;
+      }
+    };
+    TIMER_CH.addEventListener('message', handler);
+    return () => TIMER_CH.removeEventListener('message', handler);
+  }, []);
+
+  // ── Interval managed by useEffect — only run if we are owner ─
+  useEffect(() => {
+    if (!running) return;
+
+    // Claim ownership: announce to other tabs that we are the owner.
+    // If another tab was already owner, it will re-announce and we'll
+    // back off. Simple last-write-wins with a short delay is good enough.
+    isOwnerRef.current = true;
+    TIMER_CH?.postMessage({ type: 'OWNER_ALIVE', tabId: TAB_ID });
+
     const startTs = Date.now() - elapsedRef.current * 1000;
     startTsRef.current = startTs;
     persistTimerStableRef.current?.(elapsedRef.current, true, startTs);
 
     const id = setInterval(() => {
+      if (!isOwnerRef.current) {
+        // We lost ownership to another tab — stop our interval.
+        clearInterval(id);
+        return;
+      }
       elapsedRef.current += 1;
       setElapsed(elapsedRef.current);
+      // Broadcast tick to non-owner tabs so they stay in sync
+      TIMER_CH?.postMessage({ type: 'TICK', elapsed: elapsedRef.current });
       onTickRef.current?.(1);
       if (elapsedRef.current % 10 === 0) {
         persistTimerStableRef.current?.(elapsedRef.current, true, startTs);
       }
     }, 1000);
 
+    // Handle incoming OWNER_ALIVE from another tab (they also claim ownership)
+    const rivalHandler = (e) => {
+      if (e.data?.type === 'OWNER_ALIVE' && e.data.tabId !== TAB_ID) {
+        // Another tab claims ownership — re-assert ours immediately
+        // (last tab to assert within 100ms wins — fine for this use-case)
+        TIMER_CH?.postMessage({ type: 'OWNER_ALIVE', tabId: TAB_ID });
+      }
+    };
+    TIMER_CH?.addEventListener('message', rivalHandler);
+
     return () => {
       clearInterval(id);
-      // Persist paused state when effect tears down
+      TIMER_CH?.removeEventListener('message', rivalHandler);
       persistTimerStableRef.current?.(elapsedRef.current, false, null);
     };
-  }, [running]); // ← only re-runs when running flips
+  }, [running]);
 
   // ── Controls ─────────────────────────────────────────────────
   const toggle = useCallback(() => {
@@ -280,16 +329,13 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
   }, [onRunningChange]);
 
   const reset = useCallback(() => {
-    // 1. Stop running → useEffect cleanup will clear the interval
     setRunning(false);
     runningRef.current = false;
+    isOwnerRef.current = false;
     onRunningChange?.(false);
-    // 2. Zero the display
     elapsedRef.current = 0;
     setElapsed(0);
-    // 3. Persist zero to localStorage + Firebase
     persistTimer(0, false, null);
-    // 4. Tell App to zero today's dailyStudy so reload doesn't resurrect the old time
     onReset?.();
   }, [onRunningChange, persistTimer, onReset]);
 
@@ -1252,6 +1298,26 @@ export default function App() {
       setDailyStudy(savedDailyStudy);
       setSubjectDailyStudy(savedSubjDs);
       setSubjectSettings(savedSettings);
+      // Initialise subjectSwitchBaseRef to today's known total so the first
+      // switch only credits time studied AFTER load (not all historical time)
+      subjectSwitchBaseRef.current = savedDailyStudy[today] || 0;
+
+      // Credit any away-time to the active subject (timer was running when app closed)
+      if (savedTimer.sessionStartTs && savedTimer.lastSavedTs) {
+        const away        = Math.max(0, Math.floor((Date.now() - savedTimer.lastSavedTs) / 1000));
+        const activeAtClose = localStorage.getItem(K.ACTIVE_SUBJECT) || 'algorithms';
+        if (away > 0) {
+          const nextSDs = { ...savedSubjDs };
+          const d = todayISO();
+          if (!nextSDs[d]) nextSDs[d] = {};
+          nextSDs[d][activeAtClose] = (nextSDs[d][activeAtClose] ?? 0) + away;
+          ss(K.SUBJECT_DAILY_STUDY, nextSDs);
+          set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
+          setSubjectDailyStudy(nextSDs);
+          subjectDailyStudyRef.current = nextSDs;
+        }
+      }
+
       setFirebaseLoaded(true);
     }).catch(err => {
       console.error('Firebase load failed, using localStorage:', err);
@@ -1322,7 +1388,7 @@ export default function App() {
     }).catch(err => console.error('Firebase liveStats sync failed:', err));
   }, [dailyStudy, allSubjectsData, subjectDailyStudy, firebaseLoaded, timerRunning, activeSubjectId, subjectSettings, streak]);
 
-  // ── Timer tick ────────────────────────────────────────────────
+  // ── Timer tick — global time only; subject credit happens on switch/unload ─
   const handleTimerTick = useCallback((delta = 1) => {
     if (dailyStudyRef.current == null) return;
     const today = todayISO();
@@ -1336,18 +1402,48 @@ export default function App() {
       set(ref(db, 'users/rahul/global/dailyStudy'), nextDs).catch(console.error);
     }
     setDailyStudy(nextDs);
+    // NOTE: per-subject credit is NOT done here.
+    // It is done exclusively in creditSubjectTime(), which is called:
+    //   - on switchSubject (credits the outgoing subject)
+    //   - on pagehide/beforeunload (credits the active subject)
+    // This prevents the double-counting that occurred when both the tick
+    // and the switch both added time for the same interval.
+  }, []);
 
-    // Per-subject credit
-    const nextSDs  = { ...subjectDailyStudyRef.current };
+  // ── Credit elapsed time to a specific subject ─────────────────
+  // Called on subject switch and on page unload.
+  // `fromSecs` is the global daily total at the moment the subject session started.
+  // `toSecs`   is the global daily total right now.
+  const creditSubjectTime = useCallback((subjectId, fromSecs, toSecs) => {
+    const delta = toSecs - fromSecs;
+    if (delta <= 0) return;
+    const today   = todayISO();
+    const nextSDs = { ...subjectDailyStudyRef.current };
     if (!nextSDs[today]) nextSDs[today] = {};
-    const activeId = localStorage.getItem(K.ACTIVE_SUBJECT) || 'algorithms';
-    nextSDs[today][activeId] = (nextSDs[today][activeId] ?? 0) + delta;
+    nextSDs[today][subjectId] = (nextSDs[today][subjectId] ?? 0) + delta;
     subjectDailyStudyRef.current = nextSDs;
     ss(K.SUBJECT_DAILY_STUDY, nextSDs);
-    if (nextDs[today] % 10 === 0) {
-      set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
-    }
+    set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
     setSubjectDailyStudy(nextSDs);
+  }, []);
+  const creditSubjectTimeRef = useRef(creditSubjectTime);
+  useEffect(() => { creditSubjectTimeRef.current = creditSubjectTime; }, [creditSubjectTime]);
+
+  // ── Credit active subject when tab closes / hides ─────────────
+  // Without this, closing the tab without switching subjects would mean
+  // the time for the last (only) subject session is never credited.
+  useEffect(() => {
+    const handleHide = () => {
+      const today    = todayISO();
+      const totalNow = dailyStudyRef.current?.[today] ?? 0;
+      const base     = subjectSwitchBaseRef.current ?? totalNow;
+      const activeId = localStorage.getItem(K.ACTIVE_SUBJECT) || 'algorithms';
+      creditSubjectTimeRef.current(activeId, base, totalNow);
+      // Update base so if the tab restores (not fully closed), we don't double-credit
+      subjectSwitchBaseRef.current = totalNow;
+    };
+    window.addEventListener('pagehide', handleHide);
+    return () => window.removeEventListener('pagehide', handleHide);
   }, []);
 
   const handleTimerAdjust = useCallback((deltaMinutes) => {
@@ -1366,18 +1462,18 @@ export default function App() {
   // ── Timer reset — zeros today's study time completely ─────────
   const handleTimerReset = useCallback(() => {
     const today  = todayISO();
-    // Zero global daily study for today
     const nextDs = { ...dailyStudyRef.current, [today]: 0 };
     dailyStudyRef.current = nextDs;
     ss(K.DAILY_STUDY, nextDs);
     set(ref(db, 'users/rahul/global/dailyStudy'), nextDs).catch(console.error);
     setDailyStudy(nextDs);
-    // Zero per-subject study for today
     const nextSDs = { ...subjectDailyStudyRef.current, [today]: {} };
     subjectDailyStudyRef.current = nextSDs;
     ss(K.SUBJECT_DAILY_STUDY, nextSDs);
     set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
     setSubjectDailyStudy(nextSDs);
+    // Reset the switch base so next switch computes delta from 0
+    subjectSwitchBaseRef.current = 0;
   }, []);
 
   // ── Subject switch ─────────────────────────────────────────────
@@ -1385,19 +1481,12 @@ export default function App() {
     if (newId === activeSubjectId) return;
     const today    = todayISO();
     const totalNow = dailyStudyRef.current[today] ?? 0;
-    const base     = subjectSwitchBaseRef.current ?? 0;
-    const delta    = totalNow - base;
+    const base     = subjectSwitchBaseRef.current ?? totalNow; // default to now so delta=0 if base not set
 
-    if (delta > 0) {
-      const nextSDs = { ...subjectDailyStudyRef.current };
-      if (!nextSDs[today]) nextSDs[today] = {};
-      nextSDs[today][activeSubjectId] = (nextSDs[today][activeSubjectId] ?? 0) + delta;
-      subjectDailyStudyRef.current = nextSDs;
-      ss(K.SUBJECT_DAILY_STUDY, nextSDs);
-      set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
-      setSubjectDailyStudy(nextSDs);
-    }
+    // Credit time studied since the last switch (or since load) to the outgoing subject
+    creditSubjectTimeRef.current(activeSubjectId, base, totalNow);
 
+    // New base = current total, for the incoming subject's session
     subjectSwitchBaseRef.current = totalNow;
     localStorage.setItem(K.ACTIVE_SUBJECT, newId);
     setActiveSubjectId(newId);
