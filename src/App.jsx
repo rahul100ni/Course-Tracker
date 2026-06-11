@@ -258,6 +258,13 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
     firebaseInitSyncedRef.current = true;
     elapsedRef.current = firebaseInitialElapsed;
     setElapsed(firebaseInitialElapsed);
+    // Re-anchor startTsRef so the wall-clock interval stays accurate
+    // after Firebase gives us the authoritative elapsed value.
+    if (runningRef.current) {
+      const newStartTs = Date.now() - firebaseInitialElapsed * 1000;
+      startTsRef.current = newStartTs;
+      persistTimerStableRef.current?.(firebaseInitialElapsed, true, newStartTs);
+    }
   }, [firebaseInitialElapsed]);
 
   // ── Multi-tab: listen for ticks from the owner tab ───────────
@@ -265,17 +272,39 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
     if (!TIMER_CH) return;
     const handler = (e) => {
       if (e.data?.type === 'TICK' && !isOwnerRef.current) {
-        // Mirror the owner's elapsed so display stays in sync
         elapsedRef.current = e.data.elapsed;
         setElapsed(e.data.elapsed);
       }
       if (e.data?.type === 'OWNER_ALIVE') {
-        // Another tab is already the owner — we are NOT the owner
         isOwnerRef.current = false;
       }
     };
     TIMER_CH.addEventListener('message', handler);
     return () => TIMER_CH.removeEventListener('message', handler);
+  }, []);
+
+  // ── visibilitychange: instantly correct elapsed on tab focus ─────
+  // When the browser backgrounds this tab it throttles setInterval.
+  // The interval misses ticks and elapsedRef falls behind.
+  // When the user switches BACK to the tab, this fires immediately
+  // and corrects elapsed from the wall-clock anchor (startTsRef)
+  // — no page reload ever needed.
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (!runningRef.current || !startTsRef.current) return;
+      const trueElapsed = Math.max(0, Math.floor((Date.now() - startTsRef.current) / 1000));
+      const delta = trueElapsed - elapsedRef.current;
+      if (delta > 0) {
+        elapsedRef.current = trueElapsed;
+        setElapsed(trueElapsed);
+        onTickRef.current?.(delta);         // credit all missed seconds to dailyStudy
+        persistTimerStableRef.current?.(trueElapsed, true, startTsRef.current);
+        TIMER_CH?.postMessage({ type: 'TICK', elapsed: trueElapsed });
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
   // ── Interval managed by useEffect — only run if we are owner ─
@@ -294,17 +323,26 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
 
     const id = setInterval(() => {
       if (!isOwnerRef.current) {
-        // We lost ownership to another tab — stop our interval.
         clearInterval(id);
         return;
       }
-      elapsedRef.current += 1;
-      setElapsed(elapsedRef.current);
-      // Broadcast tick to non-owner tabs so they stay in sync
-      TIMER_CH?.postMessage({ type: 'TICK', elapsed: elapsedRef.current });
-      onTickRef.current?.(1);
-      if (elapsedRef.current % 10 === 0) {
-        persistTimerStableRef.current?.(elapsedRef.current, true, startTs);
+      // Compute from the wall-clock anchor — NOT by incrementing.
+      // When the browser throttles this tab's setInterval (background tabs
+      // can fire as rarely as once/minute), the delta will be > 1 and
+      // we credit ALL missed seconds at once. Self-correcting every tick.
+      const trueElapsed = Math.max(
+        elapsedRef.current,
+        Math.floor((Date.now() - startTsRef.current) / 1000)
+      );
+      const delta = trueElapsed - elapsedRef.current;
+      if (delta > 0) {
+        elapsedRef.current = trueElapsed;
+        setElapsed(trueElapsed);
+        TIMER_CH?.postMessage({ type: 'TICK', elapsed: trueElapsed });
+        onTickRef.current?.(delta);
+        if (trueElapsed % 10 < delta || trueElapsed % 10 === 0) {
+          persistTimerStableRef.current?.(trueElapsed, true, startTsRef.current);
+        }
       }
     }, 1000);
 
