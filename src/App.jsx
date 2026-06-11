@@ -406,16 +406,19 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
   const [editMode, setEditMode] = useState(false);
   const [editH, setEditH]       = useState('');
   const [editM, setEditM]       = useState('');
+  const [editS, setEditS]       = useState('');
 
   const startEdit = () => {
     setEditH(String(Math.floor(elapsed / 3600)));
     setEditM(String(Math.floor((elapsed % 3600) / 60)));
+    setEditS(String(elapsed % 60));
     setEditMode(true);
   };
   const saveEdit = () => {
-    // Compute new elapsed in whole seconds (hours + minutes + seconds).
-    // We no longer truncate to minutes — seconds input is available.
-    const newElapsed = (parseInt(editH || '0') * 3600) + (parseInt(editM || '0') * 60);
+    // Full second precision — no rounding loss
+    const newElapsed = (parseInt(editH || '0') * 3600)
+                     + (parseInt(editM || '0') * 60)
+                     + (parseInt(editS || '0'));
     elapsedRef.current = newElapsed;
     setElapsed(newElapsed);
 
@@ -455,13 +458,13 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
     return (
       <div className="rounded-xl border border-slate-700/60 bg-slate-800/40 p-5 flex flex-col gap-4">
         <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">Adjust Today's Time</p>
-        <div className="flex items-center gap-3 justify-center">
+        <div className="flex items-center gap-2 justify-center">
           <div className="flex flex-col items-center gap-1">
             <input
               type="number" min="0" max="23"
               value={editH}
               onChange={e => setEditH(e.target.value)}
-              className="w-20 text-center text-2xl font-bold font-mono bg-slate-900 border border-slate-700 rounded-lg py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
+              className="w-16 text-center text-2xl font-bold font-mono bg-slate-900 border border-slate-700 rounded-lg py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
             />
             <span className="text-xs text-slate-500">hours</span>
           </div>
@@ -471,9 +474,19 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
               type="number" min="0" max="59"
               value={editM}
               onChange={e => setEditM(e.target.value)}
-              className="w-20 text-center text-2xl font-bold font-mono bg-slate-900 border border-slate-700 rounded-lg py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
+              className="w-16 text-center text-2xl font-bold font-mono bg-slate-900 border border-slate-700 rounded-lg py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
             />
-            <span className="text-xs text-slate-500">minutes</span>
+            <span className="text-xs text-slate-500">mins</span>
+          </div>
+          <span className="text-2xl text-slate-500 font-bold pb-4">:</span>
+          <div className="flex flex-col items-center gap-1">
+            <input
+              type="number" min="0" max="59"
+              value={editS}
+              onChange={e => setEditS(e.target.value)}
+              className="w-16 text-center text-2xl font-bold font-mono bg-slate-900 border border-slate-700 rounded-lg py-2 text-slate-100 focus:outline-none focus:border-indigo-500"
+            />
+            <span className="text-xs text-slate-500">secs</span>
           </div>
         </div>
         <div className="flex gap-2">
@@ -1456,11 +1469,16 @@ export default function App() {
         }
       }
 
-      // Force elapsed = today's total
+      // Force elapsed = today's total ONLY when running (sessionStartTs present).
+      // When paused, keep the exact savedTimer.sessionElapsed — overriding with
+      // todaySecs would round/corrupt the precise paused value (e.g. 12:03 → 12:00).
       const todaySecs = savedDailyStudy[today] || 0;
+      const exactElapsed = savedTimer.sessionStartTs
+        ? todaySecs                          // running: elapsed == today total
+        : (savedTimer.sessionElapsed ?? todaySecs); // paused: keep exact seconds
       const calcTimer = {
-        sessionElapsed:  todaySecs,
-        sessionStartTs:  savedTimer.sessionStartTs ? Date.now() - todaySecs * 1000 : null,
+        sessionElapsed:  exactElapsed,
+        sessionStartTs:  savedTimer.sessionStartTs ? Date.now() - exactElapsed * 1000 : null,
         lastSavedTs:     Date.now(),
       };
       ss(K.TIMER, calcTimer);
