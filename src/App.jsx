@@ -252,19 +252,28 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
   useEffect(() => { persistTimerStableRef.current = persistTimer; }, [persistTimer]);
 
   // ── Sync from Firebase exactly once ──────────────────────────
+  // IMPORTANT: only override the local value when the timer is RUNNING.
+  // When paused, localStorage K.TIMER.sessionElapsed holds the exact
+  // second-precision value (e.g. 13:36 = 816s). Firebase's dailyStudy[today]
+  // is a rounded/lagged integer that can be 6-30s off (e.g. 810 = 13:30).
+  // Overwriting with the Firebase value when paused causes the rounding bug.
+  // When running we DO need Firebase to resync (it may have away-time the
+  // local timer missed while backgrounded).
   useEffect(() => {
     if (firebaseInitialElapsed === null) return;
     if (firebaseInitSyncedRef.current) return;
     firebaseInitSyncedRef.current = true;
-    elapsedRef.current = firebaseInitialElapsed;
-    setElapsed(firebaseInitialElapsed);
-    // Re-anchor startTsRef so the wall-clock interval stays accurate
-    // after Firebase gives us the authoritative elapsed value.
     if (runningRef.current) {
-      const newStartTs = Date.now() - firebaseInitialElapsed * 1000;
+      // Running: Firebase may have the more accurate value (away-time accounted for)
+      // Only advance, never go backwards
+      const syncVal = Math.max(elapsedRef.current, firebaseInitialElapsed);
+      elapsedRef.current = syncVal;
+      setElapsed(syncVal);
+      const newStartTs = Date.now() - syncVal * 1000;
       startTsRef.current = newStartTs;
-      persistTimerStableRef.current?.(firebaseInitialElapsed, true, newStartTs);
+      persistTimerStableRef.current?.(syncVal, true, newStartTs);
     }
+    // When paused: do nothing — the exact localStorage value is already loaded
   }, [firebaseInitialElapsed]);
 
   // ── Multi-tab: listen for ticks from the owner tab ───────────
