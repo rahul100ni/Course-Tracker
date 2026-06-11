@@ -283,28 +283,46 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
     return () => TIMER_CH.removeEventListener('message', handler);
   }, []);
 
-  // ── visibilitychange: instantly correct elapsed on tab focus ─────
-  // When the browser backgrounds this tab it throttles setInterval.
-  // The interval misses ticks and elapsedRef falls behind.
-  // When the user switches BACK to the tab, this fires immediately
-  // and corrects elapsed from the wall-clock anchor (startTsRef)
-  // — no page reload ever needed.
+  // ── Tab-focus correction: instantly resync on tab switch ─────────
+  // When the browser backgrounds this tab, setInterval is throttled
+  // (Chrome/Safari: as low as 1/min). elapsedRef falls behind.
+  //
+  // FIX: read sessionStartTs DIRECTLY from localStorage — the exact same
+  // source that initTimer() uses on a page reload. This is always accurate
+  // because persistTimer writes it synchronously before the interval starts.
+  // startTsRef.current is a computed value that can drift; localStorage is
+  // the ground truth.
+  //
+  // Two events cover all browsers and scenarios:
+  //  - visibilitychange: tab switching in all modern browsers
+  //  - window focus: window regains focus (some browsers fire this instead)
   useEffect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== 'visible') return;
-      if (!runningRef.current || !startTsRef.current) return;
-      const trueElapsed = Math.max(0, Math.floor((Date.now() - startTsRef.current) / 1000));
+    const resync = () => {
+      if (!runningRef.current) return;
+      // Read the persisted anchor — never drifts, same as reload uses
+      const saved = ls(K.TIMER, {});
+      if (!saved.sessionStartTs) return;
+      const trueElapsed = Math.max(0, Math.floor((Date.now() - saved.sessionStartTs) / 1000));
       const delta = trueElapsed - elapsedRef.current;
       if (delta > 0) {
         elapsedRef.current = trueElapsed;
         setElapsed(trueElapsed);
-        onTickRef.current?.(delta);         // credit all missed seconds to dailyStudy
-        persistTimerStableRef.current?.(trueElapsed, true, startTsRef.current);
+        onTickRef.current?.(delta);   // credit all missed seconds to dailyStudy
+        // Re-anchor startTsRef so the interval also stays aligned
+        startTsRef.current = saved.sessionStartTs;
+        persistTimerStableRef.current?.(trueElapsed, true, saved.sessionStartTs);
         TIMER_CH?.postMessage({ type: 'TICK', elapsed: trueElapsed });
       }
     };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') resync();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', resync);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', resync);
+    };
   }, []);
 
   // ── Interval managed by useEffect — only run if we are owner ─
