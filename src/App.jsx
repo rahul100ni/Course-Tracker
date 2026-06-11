@@ -1078,6 +1078,9 @@ export default function App() {
     ss(K.SUBJECT_SETTINGS, next);
     set(ref(db, 'users/rahul/global/settings/subjects'), next).catch(console.error);
   }, [subjectSettings, activeSubjectId]);
+  // Ref so pushLiveStats can read latest value without being in its deps
+  const subjectSettingsRef = useRef(subjectSettings);
+  useEffect(() => { subjectSettingsRef.current = subjectSettings; }, [subjectSettings]);
 
   // ── Per-subject state: { [subjectId]: { completedIds, lectureDates } } ──
   const [allSubjectsData, setAllSubjectsData] = useState({});
@@ -1178,9 +1181,14 @@ export default function App() {
     }
     return s;
   }, [mergedHistory, activeSubjectId, goalMins]);
+  // ── Streak ref so pushLiveStats can read it without closure staleness ──
+  const streakRef = useRef(streak);
+  useEffect(() => { streakRef.current = streak; }, [streak]);
+
 
   // ── Firebase load + migration ─────────────────────────────────
   useEffect(() => {
+
     const globalRef  = ref(db, 'users/rahul/global');
     const oldStatsRef = ref(db, 'users/rahul/stats');
 
@@ -1337,20 +1345,30 @@ export default function App() {
     });
   }, []);
 
-  // ── Sync Live Stats to Firebase ──────────────────────────────
-  const [timerRunning, setTimerRunning] = useState(false);
-  useEffect(() => {
+  // ── timerRunning: initialise from localStorage so LiveView is correct on reload
+  // (Stopwatch only calls onRunningChange on toggle, not on mount)
+  const [timerRunning, setTimerRunning] = useState(() => initTimer().running);
+  const timerRunningRef    = useRef(timerRunning);
+  const activeSubjectIdRef = useRef(activeSubjectId);
+  useEffect(() => { timerRunningRef.current    = timerRunning;    }, [timerRunning]);
+  useEffect(() => { activeSubjectIdRef.current = activeSubjectId; }, [activeSubjectId]);
+
+  // ── Stable function: build + push liveStats to Firebase ────────────
+  // Reads all timer/subject values from REFS so it never goes stale,
+  // meaning it only needs `firebaseLoaded` in its own deps array.
+  // This lets us call it from a 30-second interval without re-creating
+  // the interval every second (which caused the oscillating display bug).
+  const pushLiveStats = useCallback(() => {
     if (!firebaseLoaded) return;
-    const today   = todayISO();
+    const today    = todayISO();
     const subjects = {};
 
     SUBJECT_LIST.forEach(subj => {
-      const sd            = allSubjectsData[subj.id] || {};
+      const sd             = allSubjectsDataRef.current[subj.id] || {};
       const totalCompleted = sd.completedIds?.size ?? 0;
       const totalLectures  = subj.lectures.length;
       const coursePct      = totalLectures > 0 ? (totalCompleted / totalLectures) * 100 : 0;
 
-      // Content watched today
       const todayEntries = sd.lectureDates
         ? Object.entries(sd.lectureDates).filter(([, d]) => d === today)
         : [];
@@ -1362,31 +1380,49 @@ export default function App() {
         .map(([idStr]) => subj.lectures.find(l => l.id === Number(idStr))?.title)
         .filter(Boolean);
 
-      // Effective goal
-      const settingsGoal = subjectSettings[subj.id]?.dailyGoalMins;
+      const settingsGoal = subjectSettingsRef.current[subj.id]?.dailyGoalMins;
       const goalMins     = settingsGoal !== undefined ? settingsGoal : subj.defaultDailyGoalMins;
 
       subjects[subj.id] = {
-        todayStudySecs:   subjectDailyStudy[today]?.[subj.id] || 0,
+        todayStudySecs:   subjectDailyStudyRef.current[today]?.[subj.id] || 0,
         todayCourseMins:  todayCourseMinsSubj,
         completedToday,
         totalCompleted,
         totalLectures,
         coursePct,
         goalMins,
-        totalCourseMins:  subj.lectures.reduce((s, l) => s + l.duration, 0),
+        totalCourseMins: subj.lectures.reduce((s, l) => s + l.duration, 0),
       };
     });
 
     set(ref(db, 'users/rahul/liveStats'), {
-      todayStudySeconds: dailyStudy[today] || 0,
-      timerRunning,
-      activeSubject:     activeSubjectId,
-      streak,
+      todayStudySeconds: dailyStudyRef.current[today] || 0,
+      timerRunning:      timerRunningRef.current,
+      activeSubject:     activeSubjectIdRef.current,
+      streak:            streakRef.current,
       subjects,
       updatedAt:         new Date().toISOString(),
-    }).catch(err => console.error('Firebase liveStats sync failed:', err));
-  }, [dailyStudy, allSubjectsData, subjectDailyStudy, firebaseLoaded, timerRunning, activeSubjectId, subjectSettings, streak]);
+    }).catch(err => console.error('liveStats push failed:', err));
+  }, [firebaseLoaded]); // ← stable: data read from refs, not state closures
+
+  // Effect A: push immediately when structural data changes
+  // (lecture ticked, goal changed, subject switched, timer toggled, streak changed)
+  // dailyStudy and subjectDailyStudy are intentionally NOT deps here —
+  // they are read from refs inside pushLiveStats. This prevents a push
+  // every single second (which caused the oscillating-clock bug in LiveView).
+  useEffect(() => {
+    pushLiveStats();
+  }, [allSubjectsData, subjectSettings, timerRunning, activeSubjectId, streak, pushLiveStats]);
+
+  // Effect B: while timer is running, push every 30 s so LiveView's clock
+  // stays accurate even if no structural change happens.
+  // LiveView extrapolates seconds locally between these pushes — smooth.
+  useEffect(() => {
+    if (!timerRunning || !firebaseLoaded) return;
+    const id = setInterval(pushLiveStats, 30_000);
+    return () => clearInterval(id);
+  }, [timerRunning, firebaseLoaded, pushLiveStats]);
+
 
   // ── Timer tick — global time only; subject credit happens on switch/unload ─
   const handleTimerTick = useCallback((delta = 1) => {
