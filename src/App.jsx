@@ -17,8 +17,8 @@ const K = {
   SUBJECT_DAILY_STUDY: 'cst_v5_subject_daily_study',
   ACTIVE_SUBJECT:      'cst_v5_active_subject',
   SUBJECT_SETTINGS:    'cst_v5_subject_settings',
-  TIMER_OWNER_TAB:     'cst_v5_timer_owner_tab',   // for multi-tab leader election
-  // Per-subject: cst_v5_{id}_completed  and  cst_v5_{id}_lecture_dates
+  FOCUS_GOAL:          'cst_v5_focus_goal_mins',   // global daily focus-time goal
+  TIMER_OWNER_TAB:     'cst_v5_timer_owner_tab',
   completed:    (id) => `cst_v5_${id}_completed`,
   lectureDates: (id) => `cst_v5_${id}_lecture_dates`,
 };
@@ -949,26 +949,25 @@ function SectionAccordion({ sectionData, completedIds, lectureDates, onToggle, s
 /* ═══════════════════════════════════════════════════════════════
    COMPONENT: StudyHistory — multi-subject aware
 ═══════════════════════════════════════════════════════════════ */
-function StudyHistory({ mergedHistory, subjectSettings }) {
-  const [expanded, setExpanded] = useState(true);
+function StudyHistory({ mergedHistory, focusGoalMins, onFocusGoalChange }) {
+  const [expanded,   setExpanded]   = useState(true);
+  const [editingGoal, setEditingGoal] = useState(false);
+  const [goalDraft,   setGoalDraft]   = useState('');
 
   const days = useMemo(
     () => Object.entries(mergedHistory).sort(([a], [b]) => b.localeCompare(a)).slice(0, 90),
     [mergedHistory]
   );
 
-  const totalGoalMins = useMemo(() => {
-    return SUBJECT_LIST.reduce((sum, s) => {
-      const g = subjectSettings[s.id]?.dailyGoalMins;
-      return sum + (g !== undefined ? g : s.defaultDailyGoalMins);
-    }, 0);
-  }, [subjectSettings]);
+  // Goal is based on FOCUS TIME (global timer seconds), not content minutes.
+  // focusGoalMins = 0 means no goal set (hide goal UI).
+  const goalSecs = focusGoalMins * 60;
 
   const statsSummary = useMemo(() => {
     const entries = Object.entries(mergedHistory);
     if (entries.length === 0) return null;
 
-    let totalSecs = 0, totalContentMins = 0, goalsMetCount = 0, maxMins = 0, maxDate = '';
+    let totalSecs = 0, totalContentMins = 0, goalsMetCount = 0, maxSecs = 0, maxDate = '';
     const oneWeekAgoStr = (() => {
       const d = new Date(); d.setDate(d.getDate() - 7);
       return d.toLocaleDateString('en-CA');
@@ -980,17 +979,18 @@ function StudyHistory({ mergedHistory, subjectSettings }) {
       const mins  = Object.values(data.subjects || {}).reduce((s, sd) => s + (sd.courseMinutesWatched || 0), 0);
       totalSecs  += secs;
       totalContentMins += mins;
-      if (mins >= totalGoalMins && totalGoalMins > 0) goalsMetCount++;
-      if (mins > maxMins) { maxMins = mins; maxDate = date; }
+      // Goal is met when focus TIME meets or exceeds the focus goal
+      if (goalSecs > 0 && secs >= goalSecs) goalsMetCount++;
+      if (secs > maxSecs) { maxSecs = secs; maxDate = date; }
       if (date >= oneWeekAgoStr) { weeklySecs += secs; weeklyMins += mins; }
     });
 
     return {
       totalSecs, totalContentMins, goalsMetCount,
       successRate: entries.length > 0 ? (goalsMetCount / entries.length) * 100 : 0,
-      maxMins, maxDate, weeklySecs, weeklyMins, activeDays: entries.length,
+      maxSecs, maxDate, weeklySecs, weeklyMins, activeDays: entries.length,
     };
-  }, [mergedHistory, totalGoalMins]);
+  }, [mergedHistory, goalSecs]);
 
   if (days.length === 0) {
     return (
@@ -1006,6 +1006,12 @@ function StudyHistory({ mergedHistory, subjectSettings }) {
 
   const summary = statsSummary;
 
+  const saveGoal = () => {
+    const v = parseInt(goalDraft, 10);
+    if (!isNaN(v) && v >= 0) onFocusGoalChange(v);
+    setEditingGoal(false);
+  };
+
   return (
     <section id="study-history">
       <button className="w-full flex items-center gap-2 mb-4" onClick={() => setExpanded(e => !e)}>
@@ -1013,11 +1019,37 @@ function StudyHistory({ mergedHistory, subjectSettings }) {
         <h2 className="text-sm font-semibold uppercase tracking-widest text-slate-400">Study History</h2>
         <div className="flex-1 h-px bg-slate-800 ml-2" />
         <div className="flex items-center gap-3 mr-2">
-          <span className="text-xs text-slate-500 font-mono hidden sm:block">
+          {/* Inline focus-goal editor */}
+          {editingGoal ? (
+            <div
+              className="flex items-center gap-1"
+              onClick={e => e.stopPropagation()}
+            >
+              <input
+                type="number" min="0" max="720"
+                value={goalDraft}
+                onChange={e => setGoalDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') saveGoal(); if (e.key === 'Escape') setEditingGoal(false); }}
+                autoFocus
+                className="w-14 text-center text-xs font-mono bg-slate-900 border border-indigo-500/50 rounded px-1.5 py-0.5 text-slate-100 focus:outline-none"
+              />
+              <span className="text-[10px] text-slate-500">min goal</span>
+              <button onClick={saveGoal} className="text-[10px] font-semibold text-indigo-400 hover:text-indigo-300 px-1">Save</button>
+              <button onClick={() => setEditingGoal(false)} className="text-[10px] text-slate-500 hover:text-slate-300 px-1">✕</button>
+            </div>
+          ) : (
+            <button
+              onClick={e => { e.stopPropagation(); setGoalDraft(String(focusGoalMins)); setEditingGoal(true); }}
+              className="text-xs text-slate-500 hover:text-slate-300 flex items-center gap-1 transition-colors"
+              title="Edit daily focus goal"
+            >
+              <span className="font-mono">{focusGoalMins > 0 ? fmtMins(focusGoalMins) + ' goal' : 'No goal'}</span>
+              <Settings size={10} />
+            </button>
+          )}
+          <span className="text-xs text-slate-600 font-mono hidden sm:block">
             {fmtSecs(summary.totalSecs)} timer · {summary.goalsMetCount}/{days.length} goals
           </span>
-          <Calendar size={13} className="text-slate-600" />
-          <span className="text-xs text-slate-600 font-mono">{days.length}d</span>
         </div>
         {expanded ? <ChevronUp size={14} className="text-slate-500" /> : <ChevronDown size={14} className="text-slate-500" />}
       </button>
@@ -1027,10 +1059,10 @@ function StudyHistory({ mergedHistory, subjectSettings }) {
           {/* Summary stats */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {[
-              { label: 'Goal Success Rate', value: `${summary.successRate.toFixed(0)}%`, sub: `${summary.goalsMetCount} / ${summary.activeDays} days`, color: 'text-emerald-400' },
+              { label: 'Goal Success Rate', value: focusGoalMins > 0 ? `${summary.successRate.toFixed(0)}%` : '—', sub: focusGoalMins > 0 ? `${summary.goalsMetCount} / ${summary.activeDays} days` : 'Set a goal above', color: 'text-emerald-400' },
               { label: 'Last 7 Days',        value: fmtSecs(summary.weeklySecs),          sub: `${fmtMins(summary.weeklyMins)} content`,              color: 'text-indigo-300'  },
               { label: 'All-Time Focus',     value: `${Math.round(summary.totalSecs / 3600)}h`, sub: 'total studied',                                  color: 'text-sky-400'     },
-              { label: 'Personal Best',      value: summary.maxMins > 0 ? fmtMins(summary.maxMins) : '—', sub: summary.maxDate ? dateLabel(summary.maxDate) : '', color: 'text-amber-400' },
+              { label: 'Personal Best',      value: summary.maxSecs > 0 ? fmtSecs(summary.maxSecs) : '—', sub: summary.maxDate ? dateLabel(summary.maxDate) : '', color: 'text-amber-400' },
             ].map(item => (
               <div key={item.label} className="rounded-xl border border-slate-800 bg-slate-900/30 p-3 flex flex-col justify-between">
                 <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">{item.label}</span>
@@ -1048,8 +1080,9 @@ function StudyHistory({ mergedHistory, subjectSettings }) {
               const studiedSecs     = rec.studiedSeconds ?? 0;
               const subjectEntries  = Object.entries(rec.subjects || {}).filter(([, sd]) => sd.courseMinutesWatched > 0 || sd.lecturesCompleted > 0);
               const totalContentMin = subjectEntries.reduce((s, [, sd]) => s + (sd.courseMinutesWatched || 0), 0);
-              const met             = totalGoalMins > 0 && totalContentMin >= totalGoalMins;
-              const goalPct         = totalGoalMins > 0 ? Math.min((totalContentMin / totalGoalMins) * 100, 100) : 0;
+              // Goal is focus-time based: did you sit and study for N minutes?
+              const met             = goalSecs > 0 && studiedSecs >= goalSecs;
+              const goalPct         = goalSecs > 0 ? Math.min((studiedSecs / goalSecs) * 100, 100) : 0;
               const isToday         = date === todayISO();
 
               return (
@@ -1102,7 +1135,7 @@ function StudyHistory({ mergedHistory, subjectSettings }) {
                     </div>
 
                     {/* Goal badge */}
-                    {totalGoalMins > 0 && (
+                    {goalSecs > 0 && (
                       <div className="flex-shrink-0 text-center">
                         <div className={`w-8 h-8 rounded-full flex items-center justify-center mx-auto ${met ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-700/40 text-slate-600'}`}>
                           {met ? <CheckCircle2 size={16} /> : <Circle size={16} />}
@@ -1114,8 +1147,8 @@ function StudyHistory({ mergedHistory, subjectSettings }) {
                     )}
                   </div>
 
-                  {/* Combined goal bar (only when goal is set and there's content) */}
-                  {totalGoalMins > 0 && totalContentMin > 0 && (
+                  {/* Focus goal progress bar */}
+                  {goalSecs > 0 && studiedSecs > 0 && (
                     <div className="mt-3">
                       <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
                         <div
@@ -1127,8 +1160,8 @@ function StudyHistory({ mergedHistory, subjectSettings }) {
                         />
                       </div>
                       <div className="flex justify-between mt-0.5">
-                        <span className="text-[10px] text-slate-700 font-mono">{fmtMins(totalContentMin)} content</span>
-                        <span className="text-[10px] text-slate-700 font-mono">{fmtMins(totalGoalMins)} goal</span>
+                        <span className="text-[10px] text-slate-700 font-mono">{fmtSecs(studiedSecs)} focus</span>
+                        <span className="text-[10px] text-slate-700 font-mono">{fmtMins(focusGoalMins)} goal</span>
                       </div>
                     </div>
                   )}
@@ -1345,9 +1378,19 @@ export default function App() {
     ss(K.SUBJECT_SETTINGS, next);
     set(ref(db, 'users/rahul/global/settings/subjects'), next).catch(console.error);
   }, [subjectSettings, activeSubjectId]);
-  // Ref so pushLiveStats can read latest value without being in its deps
   const subjectSettingsRef = useRef(subjectSettings);
   useEffect(() => { subjectSettingsRef.current = subjectSettings; }, [subjectSettings]);
+
+  // ── Global daily focus-time goal (editable in StudyHistory header) ────────────────
+  const [focusGoalMins, setFocusGoalMins] = useState(
+    () => ls(K.FOCUS_GOAL, 120)   // default 2 hours
+  );
+  const handleFocusGoalChange = useCallback((newMins) => {
+    const v = Math.max(0, newMins);
+    setFocusGoalMins(v);
+    ss(K.FOCUS_GOAL, v);
+    set(ref(db, 'users/rahul/global/settings/focusGoalMins'), v).catch(console.error);
+  }, []);
 
   // ── Per-subject state: { [subjectId]: { completedIds, lectureDates } } ──
   const [allSubjectsData, setAllSubjectsData] = useState({});
@@ -2122,7 +2165,11 @@ export default function App() {
         </section>
 
         {/* Study History */}
-        <StudyHistory mergedHistory={mergedHistory} subjectSettings={subjectSettings} />
+        <StudyHistory
+          mergedHistory={mergedHistory}
+          focusGoalMins={focusGoalMins}
+          onFocusGoalChange={handleFocusGoalChange}
+        />
 
         {/* Footer */}
         <footer className="py-4 border-t border-slate-800/50">
