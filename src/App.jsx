@@ -227,7 +227,7 @@ function CourseProgressBar({ pct, accent = 'indigo' }) {
    - firebaseInitialElapsed is consumed exactly once via a ref-guard;
      it must not be passed as a live-changing value from the parent.
 ═══════════════════════════════════════════════════════════════ */
-function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunningChange }) {
+function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, firebaseTimerRunning, onRunningChange }) {
   const [elapsed, setElapsed] = useState(() => initTimer().elapsed);
   const [running, setRunning] = useState(() => initTimer().running);
   const elapsedRef            = useRef(elapsed);
@@ -238,6 +238,11 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
   const persistTimerStableRef = useRef(null);
   // Multi-tab: this tab owns the interval only if no other tab claimed it first
   const isOwnerRef            = useRef(false);
+  // Observer mode: Firebase says timer is running but this device didn't start it.
+  // In observer mode the timer displays as running but does NOT write ticks,
+  // persist state, or claim BroadcastChannel ownership — purely a live display.
+  // Exits automatically when the user manually presses play/pause (toggle()).
+  const observerModeRef       = useRef(false);
 
   useEffect(() => { onTickRef.current = onTick; }, [onTick]);
 
@@ -280,26 +285,41 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
     firebaseInitSyncedRef.current = true;
 
     if (runningRef.current) {
-      // Case A: running — take the larger value
+      // Case A: already running locally — take the larger value (away-time)
       const syncVal = Math.max(elapsedRef.current, firebaseInitialElapsed);
       elapsedRef.current = syncVal;
       setElapsed(syncVal);
       const newStartTs = Date.now() - syncVal * 1000;
       startTsRef.current = newStartTs;
       persistTimerStableRef.current?.(syncVal, true, newStartTs);
+
+    } else if (firebaseTimerRunning) {
+      // Case D: Firebase says timer is RUNNING but this device is paused.
+      // Enter observer mode: show the timer as running (counting up) without
+      // writing anything to Firebase or localStorage.
+      // This happens when you open mobile while PC has the timer running.
+      elapsedRef.current = firebaseInitialElapsed;
+      setElapsed(firebaseInitialElapsed);
+      observerModeRef.current = true;
+      runningRef.current      = true;
+      setRunning(true);
+      // Anchor startTs from Firebase elapsed so wall-clock computation is accurate
+      startTsRef.current = Date.now() - firebaseInitialElapsed * 1000;
+      // NOTE: do NOT call onRunningChange — that would trigger App side-effects
+      // (dailyStudy writes, pushLiveStats). Observer mode is display-only.
+
     } else {
-      // Case B/C: paused — only sync if the difference is large enough
-      // to indicate a reset or stale state (not just normal rounding)
+      // Case B/C: paused locally, threshold-based sync
+      //   Small diff (≤ 30 s) = rounding artifact — keep local precision
+      //   Large diff (> 30 s) = reset or stale state — Firebase wins
       const diff = elapsedRef.current - firebaseInitialElapsed;
       if (Math.abs(diff) > 30) {
-        // Case C: significant difference — Firebase wins
         elapsedRef.current = firebaseInitialElapsed;
         setElapsed(firebaseInitialElapsed);
         persistTimerStableRef.current?.(firebaseInitialElapsed, false, null);
       }
-      // Case B: small diff ≤ 30 s — keep local (paused precision preserved)
     }
-  }, [firebaseInitialElapsed]);
+  }, [firebaseInitialElapsed, firebaseTimerRunning]);
 
 
   // ── Multi-tab: listen for ticks from the owner tab ───────────
@@ -334,7 +354,17 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
   useEffect(() => {
     const resync = () => {
       if (!runningRef.current) return;
-      // Read the persisted anchor — never drifts, same as reload uses
+      // Observer mode: just recompute from our own startTsRef — no writes
+      if (observerModeRef.current) {
+        if (!startTsRef.current) return;
+        const trueElapsed = Math.max(0, Math.floor((Date.now() - startTsRef.current) / 1000));
+        if (trueElapsed > elapsedRef.current) {
+          elapsedRef.current = trueElapsed;
+          setElapsed(trueElapsed);
+        }
+        return;
+      }
+      // Normal mode: read the persisted anchor — never drifts
       const saved = ls(K.TIMER, {});
       if (!saved.sessionStartTs) return;
       const trueElapsed = Math.max(0, Math.floor((Date.now() - saved.sessionStartTs) / 1000));
@@ -343,7 +373,6 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
         elapsedRef.current = trueElapsed;
         setElapsed(trueElapsed);
         onTickRef.current?.(delta);   // credit all missed seconds to dailyStudy
-        // Re-anchor startTsRef so the interval also stays aligned
         startTsRef.current = saved.sessionStartTs;
         persistTimerStableRef.current?.(trueElapsed, true, saved.sessionStartTs);
         TIMER_CH?.postMessage({ type: 'TICK', elapsed: trueElapsed });
@@ -360,13 +389,28 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
     };
   }, []);
 
-  // ── Interval managed by useEffect — only run if we are owner ─
+  // ── Interval managed by useEffect ────────────────────────────
   useEffect(() => {
     if (!running) return;
 
-    // Claim ownership: announce to other tabs that we are the owner.
-    // If another tab was already owner, it will re-announce and we'll
-    // back off. Simple last-write-wins with a short delay is good enough.
+    // Observer mode: skip ownership claim, skip Firebase writes.
+    // Just run a display-only interval anchored to startTsRef.
+    if (observerModeRef.current) {
+      const id = setInterval(() => {
+        if (!startTsRef.current) return;
+        const trueElapsed = Math.max(
+          elapsedRef.current,
+          Math.floor((Date.now() - startTsRef.current) / 1000)
+        );
+        if (trueElapsed > elapsedRef.current) {
+          elapsedRef.current = trueElapsed;
+          setElapsed(trueElapsed);
+        }
+      }, 1000);
+      return () => clearInterval(id);
+    }
+
+    // Normal mode: claim ownership, write ticks, persist state.
     isOwnerRef.current = true;
     TIMER_CH?.postMessage({ type: 'OWNER_ALIVE', tabId: TAB_ID });
 
@@ -379,10 +423,6 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
         clearInterval(id);
         return;
       }
-      // Compute from the wall-clock anchor — NOT by incrementing.
-      // When the browser throttles this tab's setInterval (background tabs
-      // can fire as rarely as once/minute), the delta will be > 1 and
-      // we credit ALL missed seconds at once. Self-correcting every tick.
       const trueElapsed = Math.max(
         elapsedRef.current,
         Math.floor((Date.now() - startTsRef.current) / 1000)
@@ -399,11 +439,8 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
       }
     }, 1000);
 
-    // Handle incoming OWNER_ALIVE from another tab (they also claim ownership)
     const rivalHandler = (e) => {
       if (e.data?.type === 'OWNER_ALIVE' && e.data.tabId !== TAB_ID) {
-        // Another tab claims ownership — re-assert ours immediately
-        // (last tab to assert within 100ms wins — fine for this use-case)
         TIMER_CH?.postMessage({ type: 'OWNER_ALIVE', tabId: TAB_ID });
       }
     };
@@ -412,7 +449,10 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
     return () => {
       clearInterval(id);
       TIMER_CH?.removeEventListener('message', rivalHandler);
-      persistTimerStableRef.current?.(elapsedRef.current, false, null);
+      // Don't persist paused state in observer mode — we didn't own the session
+      if (!observerModeRef.current) {
+        persistTimerStableRef.current?.(elapsedRef.current, false, null);
+      }
     };
   }, [running]);
 
@@ -421,6 +461,9 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
     setRunning(prev => {
       const next = !prev;
       runningRef.current = next;
+      // Exiting observer mode: this device is now taking control.
+      // From here on, writes to Firebase/dailyStudy are allowed.
+      observerModeRef.current = false;
       onRunningChange?.(next);
       return next;
     });
@@ -1539,16 +1582,18 @@ export default function App() {
       setDailyStudy(savedDailyStudy);
       setSubjectDailyStudy(savedSubjDs);
       setSubjectSettings(savedSettings);
-      // subjectSwitchBaseRef = today's reconciled total (after away-time was folded
-      // into trueElapsed above). This ensures the first subject switch only credits
-      // time studied AFTER this load, not any historical time.
+      // subjectSwitchBaseRef = today's reconciled total so the first subject switch
+      // only credits time studied AFTER this load, not all historical time.
       subjectSwitchBaseRef.current = savedDailyStudy[today] || 0;
-      // NOTE: we intentionally do NOT separately add away-time to subjectDailyStudy here.
-      // The global total (dailyStudy[today]) already reflects full elapsed via sessionStartTs.
-      // The per-subject live credit happens two ways:
-      //   1. pushLiveStats adds liveExtra = (trueToday - switchBase) to the active subject.
-      //   2. pagehide / switchSubject calls creditSubjectTime when the user actually stops.
-      // Adding away-time here AND crediting it again on the next switch = double credit.
+      // If Firebase says the timer is running (sessionStartTs exists), signal
+      // Stopwatch to enter observer mode so mobile/secondary devices display
+      // the running timer without writing ticks to Firebase themselves.
+      if (savedTimer.sessionStartTs) {
+        setFirebaseSessionRunning(true);
+      }
+      // NOTE: we do NOT separately add away-time to subjectDailyStudy here.
+      // The global total already reflects full elapsed via sessionStartTs.
+      // Per-subject credit happens via pagehide/switchSubject (creditSubjectTime).
 
       setFirebaseLoaded(true);
     }).catch(err => {
@@ -1572,6 +1617,10 @@ export default function App() {
   // ── timerRunning: initialise from localStorage so LiveView is correct on reload
   // (Stopwatch only calls onRunningChange on toggle, not on mount)
   const [timerRunning, setTimerRunning] = useState(() => initTimer().running);
+  // firebaseSessionRunning: set to true when Firebase load reveals the timer was
+  // running (savedTimer.sessionStartTs exists). Passed to Stopwatch so it can
+  // enter observer mode when this device didn't start the session.
+  const [firebaseSessionRunning, setFirebaseSessionRunning] = useState(false);
   const timerRunningRef    = useRef(timerRunning);
   const activeSubjectIdRef = useRef(activeSubjectId);
   useEffect(() => { timerRunningRef.current    = timerRunning;    }, [timerRunning]);
@@ -2007,6 +2056,7 @@ export default function App() {
               onAdjust={handleTimerAdjust}
               onReset={handleTimerReset}
               firebaseInitialElapsed={firebaseLoaded ? (dailyStudy[todayISO()] ?? 0) : null}
+              firebaseTimerRunning={firebaseSessionRunning}
               onRunningChange={setTimerRunning}
             />
             <DailyGoalCard

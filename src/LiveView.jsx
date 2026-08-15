@@ -221,8 +221,9 @@ function SubjectCard({ subj, data, isActive, running }) {
 export default function LiveView() {
   const [stats, setStats]               = useState(null);
   const [loading, setLoading]           = useState(true);
-  const [firebaseError, setFirebaseError] = useState(false);
-  const [retryKey, setRetryKey]         = useState(0); // increments to re-trigger the Firebase effect
+  const [slowConnection, setSlowConnection] = useState(false); // soft warning after 8s
+  const [firebaseError, setFirebaseError] = useState(false);   // hard error after 45s
+  const [retryKey, setRetryKey]         = useState(0);
   const [displaySecs, setDisplaySecs]   = useState(0);
   // Per-subject live display secs: { [subjectId]: number }
   const [displaySubjectSecs, setDisplaySubjectSecs] = useState({});
@@ -231,16 +232,21 @@ export default function LiveView() {
 
   /* ── Firebase listener */
   useEffect(() => {
-    // Safety timeout: if Firebase doesn't respond in 8s, show offline state
-    // instead of spinning forever (network loss, auth error, rule change, etc.)
+    setSlowConnection(false);
+    setFirebaseError(false);
+
+    // Phase 1: after 8s, show a soft "still connecting" message but keep trying
+    const slowTimer = setTimeout(() => setSlowConnection(true), 8000);
+    // Phase 2: after 45s, show a hard error with Retry button
     loadingTimeoutRef.current = setTimeout(() => {
       setLoading(false);
       setFirebaseError(true);
-    }, 8000);
+    }, 45000);
 
     const unsub = onValue(
       ref(db, 'users/rahul/liveStats'),
       (snap) => {
+        clearTimeout(slowTimer);
         clearTimeout(loadingTimeoutRef.current);
         const data = snap.val();
         if (data) {
@@ -256,25 +262,26 @@ export default function LiveView() {
             activeSubject: data.activeSubject,
           };
           setDisplaySecs(baseSecs);
-          // Initialise per-subject display from the push
           const initSubj = {};
           Object.keys(subjSnap).forEach(id => {
             initSubj[id] = subjSnap[id]?.todayStudySecs ?? 0;
           });
           setDisplaySubjectSecs(initSubj);
         }
+        setSlowConnection(false);
         setFirebaseError(false);
         setLoading(false);
       },
-      // Error handler: Firebase rule denied / network error
       (err) => {
         console.error('LiveView Firebase error:', err);
+        clearTimeout(slowTimer);
         clearTimeout(loadingTimeoutRef.current);
         setLoading(false);
         setFirebaseError(true);
       }
     );
     return () => {
+      clearTimeout(slowTimer);
       clearTimeout(loadingTimeoutRef.current);
       unsub();
     };
@@ -352,7 +359,14 @@ export default function LiveView() {
       <div className="min-h-screen bg-slate-950 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4 text-slate-400">
           <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-sm tracking-wide font-medium">Loading live stats…</p>
+          {slowConnection ? (
+            <div className="text-center">
+              <p className="text-sm tracking-wide font-medium text-amber-400">Still connecting…</p>
+              <p className="text-xs text-slate-600 mt-1">Slow network — please wait</p>
+            </div>
+          ) : (
+            <p className="text-sm tracking-wide font-medium">Loading live stats…</p>
+          )}
         </div>
       </div>
     );
