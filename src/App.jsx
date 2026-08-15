@@ -252,29 +252,55 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, onRunnin
   useEffect(() => { persistTimerStableRef.current = persistTimer; }, [persistTimer]);
 
   // ── Sync from Firebase exactly once ──────────────────────────
-  // IMPORTANT: only override the local value when the timer is RUNNING.
-  // When paused, localStorage K.TIMER.sessionElapsed holds the exact
-  // second-precision value (e.g. 13:36 = 816s). Firebase's dailyStudy[today]
-  // is a rounded/lagged integer that can be 6-30s off (e.g. 810 = 13:30).
-  // Overwriting with the Firebase value when paused causes the rounding bug.
-  // When running we DO need Firebase to resync (it may have away-time the
-  // local timer missed while backgrounded).
+  // Rules (all run once after firebaseLoaded):
+  //
+  // A) Running locally:
+  //    Firebase may have more time (away-time while backgrounded).
+  //    Take max(local, firebase) — only advance, never go backwards.
+  //
+  // B) Paused locally, small difference (≤ 30 s):
+  //    This is normal rounding. localStorage sessionElapsed is second-
+  //    precise (e.g. 13:36 = 816 s). Firebase dailyStudy[today] is a
+  //    slightly lagged integer written every 10 s (e.g. 810 = 13:30).
+  //    Keep local — preserves the exact paused time.
+  //
+  // C) Paused locally, large difference (> 30 s):
+  //    Firebase is significantly different. This means either:
+  //      • A reset happened on another device (local: 1050 s, Firebase: 0)
+  //      • New session started on PC (local: 1050 s, Firebase: 780 s)
+  //      • Mobile has genuinely stale localStorage data
+  //    In all these cases Firebase is the authoritative source. Apply it.
+  //
+  // 30 s threshold is safe: the tick+persist cycle runs every 10 s, so
+  // normal rounding drift is at most ~15 s. Resets and new sessions
+  // always differ by hundreds of seconds.
   useEffect(() => {
     if (firebaseInitialElapsed === null) return;
     if (firebaseInitSyncedRef.current) return;
     firebaseInitSyncedRef.current = true;
+
     if (runningRef.current) {
-      // Running: Firebase may have the more accurate value (away-time accounted for)
-      // Only advance, never go backwards
+      // Case A: running — take the larger value
       const syncVal = Math.max(elapsedRef.current, firebaseInitialElapsed);
       elapsedRef.current = syncVal;
       setElapsed(syncVal);
       const newStartTs = Date.now() - syncVal * 1000;
       startTsRef.current = newStartTs;
       persistTimerStableRef.current?.(syncVal, true, newStartTs);
+    } else {
+      // Case B/C: paused — only sync if the difference is large enough
+      // to indicate a reset or stale state (not just normal rounding)
+      const diff = elapsedRef.current - firebaseInitialElapsed;
+      if (Math.abs(diff) > 30) {
+        // Case C: significant difference — Firebase wins
+        elapsedRef.current = firebaseInitialElapsed;
+        setElapsed(firebaseInitialElapsed);
+        persistTimerStableRef.current?.(firebaseInitialElapsed, false, null);
+      }
+      // Case B: small diff ≤ 30 s — keep local (paused precision preserved)
     }
-    // When paused: do nothing — the exact localStorage value is already loaded
   }, [firebaseInitialElapsed]);
+
 
   // ── Multi-tab: listen for ticks from the owner tab ───────────
   useEffect(() => {
