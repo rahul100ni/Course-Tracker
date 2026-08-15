@@ -1578,7 +1578,7 @@ export default function App() {
       setDailyStudy(savedDailyStudy);
       setSubjectDailyStudy(savedSubjDs);
       setSubjectSettings(savedSettings);
-      subjectSwitchBaseRef.current = savedDailyStudy[today] || 0;
+      subjectSwitchBaseRef.current = savedSubjDs[today]?.[activeSubjectId] ?? 0;
       if (savedTimer.sessionStartTs) {
         setFirebaseSessionRunning(true);
       }
@@ -1708,7 +1708,13 @@ export default function App() {
     // Also send subjectSwitchBase so LiveView can re-extrapolate between pushes.
     const activeId     = activeSubjectIdRef.current;
     const switchBase   = subjectSwitchBaseRef.current ?? storedToday;
-    const liveExtra    = timerRunningRef.current ? Math.max(0, trueToday - switchBase) : 0;
+    // Always compute liveExtra regardless of running/paused state.
+    // When running: this is the real-time live credit (timer is ticking).
+    // When paused:  this is the "pending gap" — time accumulated since the last
+    //               credited event (subject switch / pagehide). Without this,
+    //               pausing the timer makes the subject focus time snap back to
+    //               the stale persisted value instead of the true total.
+    const liveExtra    = Math.max(0, trueToday - switchBase);
     if (liveExtra > 0 && activeId && subjects[activeId]) {
       subjects[activeId] = {
         ...subjects[activeId],
