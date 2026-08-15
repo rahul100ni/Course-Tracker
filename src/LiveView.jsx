@@ -219,41 +219,67 @@ function SubjectCard({ subj, data, isActive, running }) {
 
 /* ─── Main LiveView ───────────────────────────────────────────── */
 export default function LiveView() {
-  const [stats, setStats]             = useState(null);
-  const [loading, setLoading]         = useState(true);
-  const [displaySecs, setDisplaySecs] = useState(0);
+  const [stats, setStats]               = useState(null);
+  const [loading, setLoading]           = useState(true);
+  const [firebaseError, setFirebaseError] = useState(false);
+  const [retryKey, setRetryKey]         = useState(0); // increments to re-trigger the Firebase effect
+  const [displaySecs, setDisplaySecs]   = useState(0);
   // Per-subject live display secs: { [subjectId]: number }
   const [displaySubjectSecs, setDisplaySubjectSecs] = useState({});
   const snapshotBaseRef = useRef({ secs: 0, ts: Date.now(), switchBase: 0, subjects: {} });
+  const loadingTimeoutRef = useRef(null);
 
   /* ── Firebase listener */
   useEffect(() => {
-    const unsub = onValue(ref(db, 'users/rahul/liveStats'), (snap) => {
-      const data = snap.val();
-      if (data) {
-        setStats(data);
-        const baseSecs    = data.todayStudySeconds ?? 0;
-        const switchBase  = data.subjectSwitchBase ?? baseSecs;
-        const subjSnap    = data.subjects ?? {};
-        snapshotBaseRef.current = {
-          secs:        baseSecs,
-          ts:          Date.now(),
-          switchBase,
-          subjects:    subjSnap,
-          activeSubject: data.activeSubject,
-        };
-        setDisplaySecs(baseSecs);
-        // Initialise per-subject display from the push
-        const initSubj = {};
-        Object.keys(subjSnap).forEach(id => {
-          initSubj[id] = subjSnap[id]?.todayStudySecs ?? 0;
-        });
-        setDisplaySubjectSecs(initSubj);
-      }
+    // Safety timeout: if Firebase doesn't respond in 8s, show offline state
+    // instead of spinning forever (network loss, auth error, rule change, etc.)
+    loadingTimeoutRef.current = setTimeout(() => {
       setLoading(false);
-    });
-    return () => unsub();
-  }, []);
+      setFirebaseError(true);
+    }, 8000);
+
+    const unsub = onValue(
+      ref(db, 'users/rahul/liveStats'),
+      (snap) => {
+        clearTimeout(loadingTimeoutRef.current);
+        const data = snap.val();
+        if (data) {
+          setStats(data);
+          const baseSecs    = data.todayStudySeconds ?? 0;
+          const switchBase  = data.subjectSwitchBase ?? baseSecs;
+          const subjSnap    = data.subjects ?? {};
+          snapshotBaseRef.current = {
+            secs:          baseSecs,
+            ts:            Date.now(),
+            switchBase,
+            subjects:      subjSnap,
+            activeSubject: data.activeSubject,
+          };
+          setDisplaySecs(baseSecs);
+          // Initialise per-subject display from the push
+          const initSubj = {};
+          Object.keys(subjSnap).forEach(id => {
+            initSubj[id] = subjSnap[id]?.todayStudySecs ?? 0;
+          });
+          setDisplaySubjectSecs(initSubj);
+        }
+        setFirebaseError(false);
+        setLoading(false);
+      },
+      // Error handler: Firebase rule denied / network error
+      (err) => {
+        console.error('LiveView Firebase error:', err);
+        clearTimeout(loadingTimeoutRef.current);
+        setLoading(false);
+        setFirebaseError(true);
+      }
+    );
+    return () => {
+      clearTimeout(loadingTimeoutRef.current);
+      unsub();
+    };
+  }, [retryKey]);
+
 
   /* ── Live tick between Firebase pushes */
   useEffect(() => {
@@ -327,6 +353,50 @@ export default function LiveView() {
         <div className="flex flex-col items-center gap-4 text-slate-400">
           <div className="w-10 h-10 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin" />
           <p className="text-sm tracking-wide font-medium">Loading live stats…</p>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── Firebase error / offline */
+  if (firebaseError) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
+        <div className="flex flex-col items-center gap-4 text-center max-w-xs">
+          <div className="w-14 h-14 rounded-2xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center">
+            <span className="text-2xl">📡</span>
+          </div>
+          <div>
+            <p className="text-sm font-bold text-slate-200">Can't reach Firebase</p>
+            <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+              Check your internet connection and make sure the tracker tab is open on your device.
+            </p>
+          </div>
+          <button
+            onClick={() => { setFirebaseError(false); setLoading(true); setRetryKey(k => k + 1); }}
+            className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 px-3 py-1.5 rounded-lg border border-indigo-500/30 hover:border-indigo-500/50 transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  /* ── No data yet (liveStats never written) */
+  if (!stats) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
+        <div className="flex flex-col items-center gap-4 text-center max-w-xs">
+          <div className="w-14 h-14 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
+            <span className="text-2xl">⏱️</span>
+          </div>
+          <div>
+            <p className="text-sm font-bold text-slate-200">No session yet today</p>
+            <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+              Open the Study Tracker on your computer and start the timer to see live stats here.
+            </p>
+          </div>
         </div>
       </div>
     );
