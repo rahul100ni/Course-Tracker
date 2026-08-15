@@ -1513,25 +1513,16 @@ export default function App() {
       setDailyStudy(savedDailyStudy);
       setSubjectDailyStudy(savedSubjDs);
       setSubjectSettings(savedSettings);
-      // Initialise subjectSwitchBaseRef to today's known total so the first
-      // switch only credits time studied AFTER load (not all historical time)
+      // subjectSwitchBaseRef = today's reconciled total (after away-time was folded
+      // into trueElapsed above). This ensures the first subject switch only credits
+      // time studied AFTER this load, not any historical time.
       subjectSwitchBaseRef.current = savedDailyStudy[today] || 0;
-
-      // Credit any away-time to the active subject (timer was running when app closed)
-      if (savedTimer.sessionStartTs && savedTimer.lastSavedTs) {
-        const away        = Math.max(0, Math.floor((Date.now() - savedTimer.lastSavedTs) / 1000));
-        const activeAtClose = localStorage.getItem(K.ACTIVE_SUBJECT) || 'algorithms';
-        if (away > 0) {
-          const nextSDs = { ...savedSubjDs };
-          const d = todayISO();
-          if (!nextSDs[d]) nextSDs[d] = {};
-          nextSDs[d][activeAtClose] = (nextSDs[d][activeAtClose] ?? 0) + away;
-          ss(K.SUBJECT_DAILY_STUDY, nextSDs);
-          set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
-          setSubjectDailyStudy(nextSDs);
-          subjectDailyStudyRef.current = nextSDs;
-        }
-      }
+      // NOTE: we intentionally do NOT separately add away-time to subjectDailyStudy here.
+      // The global total (dailyStudy[today]) already reflects full elapsed via sessionStartTs.
+      // The per-subject live credit happens two ways:
+      //   1. pushLiveStats adds liveExtra = (trueToday - switchBase) to the active subject.
+      //   2. pagehide / switchSubject calls creditSubjectTime when the user actually stops.
+      // Adding away-time here AND crediting it again on the next switch = double credit.
 
       setFirebaseLoaded(true);
     }).catch(err => {
@@ -1714,7 +1705,9 @@ export default function App() {
       const today    = todayISO();
       const totalNow = dailyStudyRef.current?.[today] ?? 0;
       const base     = subjectSwitchBaseRef.current ?? totalNow;
-      const activeId = localStorage.getItem(K.ACTIVE_SUBJECT) || 'algorithms';
+      // Use the in-memory ref — always accurate. Never fall back to
+      // localStorage key since it may be stale or missing on first load.
+      const activeId = activeSubjectIdRef.current;
       creditSubjectTimeRef.current(activeId, base, totalNow);
       // Update base so if the tab restores (not fully closed), we don't double-credit
       subjectSwitchBaseRef.current = totalNow;
@@ -1722,6 +1715,7 @@ export default function App() {
     window.addEventListener('pagehide', handleHide);
     return () => window.removeEventListener('pagehide', handleHide);
   }, []);
+
 
   // handleTimerAdjust: called when user edits the timer display.
   // Accepts newElapsed (seconds) directly — not a delta in minutes.
@@ -1743,17 +1737,27 @@ export default function App() {
 
     // --- Active subject daily study ---
     // Credit the full adjusted elapsed to the currently active subject.
-    // Other subjects keep their existing times but are capped so they
-    // don't exceed the new global total (prevents impossible states).
-    const activeId  = activeSubjectIdRef.current;
-    const existing  = subjectDailyStudyRef.current[today] || {};
-    const otherTotal = Object.entries(existing)
-      .filter(([id]) => id !== activeId)
-      .reduce((sum, [, s]) => sum + s, 0);
-    const activeAllotted = Math.max(0, clamped - otherTotal);
+    // If other subjects' recorded time sums exceed the new global total,
+    // scale them down proportionally so sum(subjects) never exceeds global.
+    const activeId   = activeSubjectIdRef.current;
+    const existing   = subjectDailyStudyRef.current[today] || {};
+    const otherEntries = Object.entries(existing).filter(([id]) => id !== activeId);
+    const otherTotal   = otherEntries.reduce((sum, [, s]) => sum + s, 0);
+
+    let newOtherEntries = otherEntries;
+    let effectiveOtherTotal = otherTotal;
+    // If other subjects exceed the new global, scale them down proportionally
+    if (otherTotal > clamped) {
+      const scale = clamped / otherTotal;
+      newOtherEntries = otherEntries.map(([id, s]) => [id, Math.floor(s * scale)]);
+      effectiveOtherTotal = newOtherEntries.reduce((sum, [, s]) => sum + s, 0);
+    }
+
+    const activeAllotted = Math.max(0, clamped - effectiveOtherTotal);
+    const nextToday = { ...Object.fromEntries(newOtherEntries), [activeId]: activeAllotted };
     const nextSDs = {
       ...subjectDailyStudyRef.current,
-      [today]: { ...existing, [activeId]: activeAllotted },
+      [today]: nextToday,
     };
     subjectDailyStudyRef.current = nextSDs;
     ss(K.SUBJECT_DAILY_STUDY, nextSDs);
@@ -1766,6 +1770,7 @@ export default function App() {
     // Push liveStats right away so LiveView reflects the new time
     pushLiveStatsRef.current?.();
   }, []);
+
 
 
 
@@ -1784,7 +1789,11 @@ export default function App() {
     setSubjectDailyStudy(nextSDs);
     // Reset the switch base so next switch computes delta from 0
     subjectSwitchBaseRef.current = 0;
+    // Push liveStats immediately so LiveView reflects the reset at once
+    // (without this, LiveView shows stale data until the next 30s heartbeat)
+    pushLiveStatsRef.current?.();
   }, []);
+
 
   // ── Per-subject today reset ───────────────────────────────────
   const handleResetSubjectToday = useCallback((subjectId) => {
