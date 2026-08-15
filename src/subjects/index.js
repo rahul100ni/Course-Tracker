@@ -4,10 +4,12 @@
 
 import { algorithms } from './algorithms';
 import { toc }        from './toc';
+import { engmaths }   from './engmaths';
 
 export const SUBJECTS = {
   algorithms,
   toc,
+  engmaths,
 };
 
 export const SUBJECT_LIST = Object.values(SUBJECTS);
