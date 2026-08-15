@@ -334,7 +334,9 @@ export default function LiveView() {
 
   const studiedSubjects = SUBJECT_LIST.filter(s => {
     const sd = subjects[s.id];
-    return (sd?.todayStudySecs ?? 0) > 0 || (sd?.todayCourseMins ?? 0) > 0;
+    return (sd?.todayStudySecs ?? 0) > 0
+        || (sd?.todayCourseMins ?? 0) > 0
+        || (sd?.completedToday?.length ?? 0) > 0;  // show even if lectures ticked without timer
   });
 
   const studiedWithGoal  = studiedSubjects.filter(s => (subjects[s.id]?.goalMins ?? 0) > 0);

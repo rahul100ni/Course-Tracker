@@ -5,7 +5,7 @@ import {
   Circle, CheckSquare, Target, Flame, BarChart3, Calendar, Settings,
 } from 'lucide-react';
 import { SUBJECTS, SUBJECT_LIST } from './subjects/index';
-import { ref, set, get } from 'firebase/database';
+import { ref, set, get, onValue } from 'firebase/database';
 import { db } from './firebase';
 
 /* ═══════════════════════════════════════════════════════════════
@@ -1459,6 +1459,10 @@ export default function App() {
     const globalRef  = ref(db, 'users/rahul/global');
     const oldStatsRef = ref(db, 'users/rahul/stats');
 
+    // We'll set up a live subjects listener AFTER the initial load.
+    // Keep a ref to tear it down on unmount.
+    let unsubSubjects = null;
+
     get(globalRef).then(async (globalSnap) => {
       // ── ONE-TIME MIGRATION from v4 (stats/) to v5 (global/ + subjects/) ──
       if (!globalSnap.exists() || !globalSnap.val()?.migrated) {
@@ -1534,26 +1538,18 @@ export default function App() {
       const savedSettings   = settingsSnap.exists() ? settingsSnap.val() : {};
 
       // Reconcile timer using sessionStartTs — the wall-clock anchor.
-      // DO NOT use lastSavedTs: background-tab throttling means setInterval
-      // (and therefore persistTimer) may not have fired for 60+ seconds even
-      // while the timer was running, making lastSavedTs stale and away-time
-      // calculations too low.
       const today = todayISO();
       if (savedTimer.sessionStartTs) {
         const trueElapsed = Math.max(0, Math.floor((Date.now() - savedTimer.sessionStartTs) / 1000));
-        // Advance today's total to the true elapsed — never go backwards
         if (trueElapsed > (savedDailyStudy[today] ?? 0)) {
           savedDailyStudy = { ...savedDailyStudy, [today]: trueElapsed };
         }
       }
 
-      // Force elapsed = today's total ONLY when running (sessionStartTs present).
-      // When paused, keep the exact savedTimer.sessionElapsed — overriding with
-      // todaySecs would round/corrupt the precise paused value (e.g. 12:03 → 12:00).
       const todaySecs = savedDailyStudy[today] || 0;
       const exactElapsed = savedTimer.sessionStartTs
-        ? todaySecs                          // running: elapsed == today total
-        : (savedTimer.sessionElapsed ?? todaySecs); // paused: keep exact seconds
+        ? todaySecs
+        : (savedTimer.sessionElapsed ?? todaySecs);
       const calcTimer = {
         sessionElapsed:  exactElapsed,
         sessionStartTs:  savedTimer.sessionStartTs ? Date.now() - exactElapsed * 1000 : null,
@@ -1566,7 +1562,7 @@ export default function App() {
       set(ref(db, 'users/rahul/global/dailyStudy'), savedDailyStudy).catch(console.error);
       set(ref(db, 'users/rahul/global/timer'), calcTimer).catch(console.error);
 
-      // Load all subjects
+      // Build initial allSubjectsData from the one-time snapshot
       const subjVal    = allSubjSnap.exists() ? allSubjSnap.val() : {};
       const newAllSubj = {};
       for (const subj of SUBJECT_LIST) {
@@ -1582,23 +1578,44 @@ export default function App() {
       setDailyStudy(savedDailyStudy);
       setSubjectDailyStudy(savedSubjDs);
       setSubjectSettings(savedSettings);
-      // subjectSwitchBaseRef = today's reconciled total so the first subject switch
-      // only credits time studied AFTER this load, not all historical time.
       subjectSwitchBaseRef.current = savedDailyStudy[today] || 0;
-      // If Firebase says the timer is running (sessionStartTs exists), signal
-      // Stopwatch to enter observer mode so mobile/secondary devices display
-      // the running timer without writing ticks to Firebase themselves.
       if (savedTimer.sessionStartTs) {
         setFirebaseSessionRunning(true);
       }
-      // NOTE: we do NOT separately add away-time to subjectDailyStudy here.
-      // The global total already reflects full elapsed via sessionStartTs.
-      // Per-subject credit happens via pagehide/switchSubject (creditSubjectTime).
 
       setFirebaseLoaded(true);
+
+      // ── REALTIME LISTENER for cross-device lecture sync ─────────────────────────
+      // After the initial load, attach a live onValue listener to subjects/.
+      // This fires whenever ANY device toggles a lecture, so mobile/second
+      // devices see updates in real-time without requiring a page reload.
+      //
+      // IMPORTANT: toggleLecture() on THIS device also calls setAllSubjectsData
+      // directly (optimistic update), so when our own write comes back through
+      // this listener it will be a no-op (same data). Safe, idempotent.
+      unsubSubjects = onValue(
+        ref(db, 'users/rahul/subjects'),
+        (snap) => {
+          const val = snap.val() || {};
+          const updated = {};
+          for (const subj of SUBJECT_LIST) {
+            const sd = val[subj.id] || {};
+            const completedArr = sd.completed    || [];
+            const ldObj        = sd.lectureDates || {};
+            // Sync localStorage so it stays fresh on this device too
+            ss(K.completed(subj.id),    completedArr);
+            ss(K.lectureDates(subj.id), ldObj);
+            updated[subj.id] = { completedIds: new Set(completedArr), lectureDates: ldObj };
+          }
+          // Replace the entire map — this triggers Effect A → pushLiveStats
+          // so LiveView also stays current when a second device toggles.
+          setAllSubjectsData(updated);
+        },
+        (err) => console.error('subjects listener error:', err)
+      );
+
     }).catch(err => {
       console.error('Firebase load failed, using localStorage:', err);
-      // Fallback: read everything from localStorage
       const newAllSubj = {};
       SUBJECT_LIST.forEach(s => {
         newAllSubj[s.id] = {
@@ -1612,7 +1629,12 @@ export default function App() {
       setSubjectSettings(ls(K.SUBJECT_SETTINGS, {}));
       setFirebaseLoaded(true);
     });
+
+    return () => {
+      if (unsubSubjects) unsubSubjects();
+    };
   }, []);
+
 
   // ── timerRunning: initialise from localStorage so LiveView is correct on reload
   // (Stopwatch only calls onRunningChange on toggle, not on mount)
