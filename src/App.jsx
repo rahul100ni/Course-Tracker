@@ -227,7 +227,7 @@ function CourseProgressBar({ pct, accent = 'indigo' }) {
    - firebaseInitialElapsed is consumed exactly once via a ref-guard;
      it must not be passed as a live-changing value from the parent.
 ═══════════════════════════════════════════════════════════════ */
-function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, firebaseTimerRunning, onRunningChange }) {
+function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, firebaseTimerRunning, onRunningChange, onObserverModeChange }) {
   const [elapsed, setElapsed] = useState(() => initTimer().elapsed);
   const [running, setRunning] = useState(() => initTimer().running);
   const elapsedRef            = useRef(elapsed);
@@ -305,6 +305,7 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, firebase
       setRunning(true);
       // Anchor startTs from Firebase elapsed so wall-clock computation is accurate
       startTsRef.current = Date.now() - firebaseInitialElapsed * 1000;
+      onObserverModeChange?.(true);  // tell App we are display-only, suppress pushLiveStats
       // NOTE: do NOT call onRunningChange — that would trigger App side-effects
       // (dailyStudy writes, pushLiveStats). Observer mode is display-only.
 
@@ -432,6 +433,7 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, firebase
           elapsedRef.current  = finalElapsed;
           setElapsed(finalElapsed);
           observerModeRef.current = false;
+          onObserverModeChange?.(false);  // re-enable pushLiveStats on this device
           setRunning(false);              // triggers interval cleanup → writes final stopped state
           onRunningChange?.(false);       // App: setTimerRunning(false) → pushLiveStats with timerRunning:false
 
@@ -444,6 +446,7 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, firebase
           elapsedRef.current      = trueElapsed;
           setElapsed(trueElapsed);
           observerModeRef.current = true;
+          onObserverModeChange?.(true);   // suppress pushLiveStats on this device
           runningRef.current      = true;
           setRunning(true);
           // Do NOT call onRunningChange — observer mode must not trigger
@@ -528,11 +531,14 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, firebase
       runningRef.current = next;
       // Exiting observer mode: this device is now taking control.
       // From here on, writes to Firebase/dailyStudy are allowed.
-      observerModeRef.current = false;
+      if (observerModeRef.current) {
+        observerModeRef.current = false;
+        onObserverModeChange?.(false); // tell App we are no longer observers
+      }
       onRunningChange?.(next);
       return next;
     });
-  }, [onRunningChange]);
+  }, [onRunningChange, onObserverModeChange]);
 
   const reset = useCallback(() => {
     setRunning(false);
@@ -1635,7 +1641,7 @@ export default function App() {
       // ── NORMAL LOAD (already migrated) ──
       const [allSubjSnap, settingsSnap] = await Promise.all([
         get(ref(db, 'users/rahul/subjects')),
-        get(ref(db, 'users/rahul/global/settings/subjects')),
+        get(ref(db, 'users/rahul/global/settings')), // full settings node (subjects + activeSubject)
       ]);
 
       // Load global timer + daily study
@@ -1643,7 +1649,10 @@ export default function App() {
       let   savedDailyStudy = gv.dailyStudy || {};
       const savedTimer      = gv.timer || {};
       const savedSubjDs     = gv.subjectDailyStudy || {};
-      const savedSettings   = settingsSnap.exists() ? settingsSnap.val() : {};
+      const settingsVal     = settingsSnap.exists() ? settingsSnap.val() : {};
+      const savedSettings   = settingsVal.subjects || {};
+      // Authoritative active subject from Firebase (most recent across all devices)
+      const remoteActiveSubj = settingsVal.activeSubject || null;
 
       // Reconcile timer using sessionStartTs — the wall-clock anchor.
       const today = todayISO();
@@ -1686,7 +1695,35 @@ export default function App() {
       setDailyStudy(savedDailyStudy);
       setSubjectDailyStudy(savedSubjDs);
       setSubjectSettings(savedSettings);
-      subjectSwitchBaseRef.current = savedSubjDs[today]?.[activeSubjectId] ?? 0;
+
+      // ── Active subject sync ──────────────────────────────────────────────
+      // Firebase is the authoritative source for which subject is active.
+      // It is written by switchSubject() on every device. This ensures that
+      // when you open mobile while PC is studying Maths, mobile also opens
+      // Maths — not whatever was last stored in mobile's localStorage.
+      const resolvedActiveSubj = (remoteActiveSubj && SUBJECTS[remoteActiveSubj])
+        ? remoteActiveSubj
+        : activeSubjectId;  // fallback to localStorage value
+
+      if (resolvedActiveSubj !== activeSubjectId) {
+        // Override stale mobile localStorage with Firebase's current subject
+        setActiveSubjectId(resolvedActiveSubj);
+        localStorage.setItem(K.ACTIVE_SUBJECT, resolvedActiveSubj);
+      }
+      if (!remoteActiveSubj) {
+        // First ever load on this account — seed Firebase with local value
+        set(ref(db, 'users/rahul/global/settings/activeSubject'), resolvedActiveSubj).catch(console.error);
+      }
+
+      // subjectSwitchBaseRef = global daily total at the moment THIS subject's session started.
+      // Use the subject's already-credited time as the base — correct for BOTH:
+      //   • Same device (same subject, unfinished session): base=0, liveExtra = full today ✓
+      //   • Different device (subject from Firebase, which may differ from stale localStorage):
+      //     base = whatever was credited to that subject = 0 if PC hadn't switched yet.
+      //     liveExtra will reflect only time earned since base, which is correct since
+      //     observer mode now suppresses pushLiveStats (no overwrite from mobile).
+      subjectSwitchBaseRef.current = savedSubjDs[today]?.[resolvedActiveSubj] ?? 0;
+
       if (savedTimer.sessionStartTs) {
         setFirebaseSessionRunning(true);
       }
@@ -1751,6 +1788,11 @@ export default function App() {
   // running (savedTimer.sessionStartTs exists). Passed to Stopwatch so it can
   // enter observer mode when this device didn't start the session.
   const [firebaseSessionRunning, setFirebaseSessionRunning] = useState(false);
+  // isObserverMode: true while Stopwatch is in display-only observer mode.
+  // Gates pushLiveStats so an observing device never overwrites the owner's data.
+  const [isObserverMode, setIsObserverMode] = useState(false);
+  const isObserverModeRef = useRef(false);
+  useEffect(() => { isObserverModeRef.current = isObserverMode; }, [isObserverMode]);
   const timerRunningRef    = useRef(timerRunning);
   const activeSubjectIdRef = useRef(activeSubjectId);
   useEffect(() => { timerRunningRef.current    = timerRunning;    }, [timerRunning]);
@@ -1763,6 +1805,9 @@ export default function App() {
   // the interval every second (which caused the oscillating display bug).
   const pushLiveStats = useCallback(() => {
     if (!firebaseLoaded) return;
+    // Observer mode: this device is display-only — the owner device will push.
+    // Pushing from here would overwrite the owner's accurate data with our stale values.
+    if (isObserverModeRef.current) return;
     const today    = todayISO();
     const subjects = {};
 
@@ -2026,7 +2071,7 @@ export default function App() {
     if (newId === activeSubjectId) return;
     const today    = todayISO();
     const totalNow = dailyStudyRef.current[today] ?? 0;
-    const base     = subjectSwitchBaseRef.current ?? totalNow; // default to now so delta=0 if base not set
+    const base     = subjectSwitchBaseRef.current ?? totalNow;
 
     // Credit time studied since the last switch (or since load) to the outgoing subject
     creditSubjectTimeRef.current(activeSubjectId, base, totalNow);
@@ -2034,6 +2079,8 @@ export default function App() {
     // New base = current total, for the incoming subject's session
     subjectSwitchBaseRef.current = totalNow;
     localStorage.setItem(K.ACTIVE_SUBJECT, newId);
+    // Write to Firebase so every other device (mobile, LiveView) opens with this subject
+    set(ref(db, 'users/rahul/global/settings/activeSubject'), newId).catch(console.error);
     setActiveSubjectId(newId);
   }, [activeSubjectId]);
 
@@ -2194,6 +2241,7 @@ export default function App() {
               firebaseInitialElapsed={firebaseLoaded ? (dailyStudy[todayISO()] ?? 0) : null}
               firebaseTimerRunning={firebaseSessionRunning}
               onRunningChange={setTimerRunning}
+              onObserverModeChange={setIsObserverMode}
             />
             <DailyGoalCard
               todayCourseMins={todayCourseMins}
