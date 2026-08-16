@@ -1487,8 +1487,6 @@ export default function App() {
   const [subjectDailyStudy, setSubjectDailyStudy] = useState(() => ls(K.SUBJECT_DAILY_STUDY, {}));
   const subjectDailyStudyRef = useRef(subjectDailyStudy);
   useEffect(() => { subjectDailyStudyRef.current = subjectDailyStudy; }, [subjectDailyStudy]);
-  // Records the value of dailyStudy[today] at the moment of the last subject switch
-  const subjectSwitchBaseRef = useRef(null);
 
   // ── Derived analytics for active subject ─────────────────────
   const completedMins = useMemo(
@@ -1715,29 +1713,16 @@ export default function App() {
         set(ref(db, 'users/rahul/global/settings/activeSubject'), resolvedActiveSubj).catch(console.error);
       }
 
-      // subjectSwitchBaseRef = global daily total at the moment THIS subject's session started.
-      // Use the subject's already-credited time as the base — correct for BOTH:
-      //   • Same device (same subject, unfinished session): base=0, liveExtra = full today ✓
-      //   • Different device (subject from Firebase, which may differ from stale localStorage):
-      //     base = whatever was credited to that subject = 0 if PC hadn't switched yet.
-      //     liveExtra will reflect only time earned since base, which is correct since
-      //     observer mode now suppresses pushLiveStats (no overwrite from mobile).
-      subjectSwitchBaseRef.current = savedSubjDs[today]?.[resolvedActiveSubj] ?? 0;
-
       if (savedTimer.sessionStartTs) {
         setFirebaseSessionRunning(true);
       }
 
       setFirebaseLoaded(true);
 
-      // ── REALTIME LISTENER for cross-device lecture sync ─────────────────────────
-      // After the initial load, attach a live onValue listener to subjects/.
-      // This fires whenever ANY device toggles a lecture, so mobile/second
-      // devices see updates in real-time without requiring a page reload.
-      //
-      // IMPORTANT: toggleLecture() on THIS device also calls setAllSubjectsData
-      // directly (optimistic update), so when our own write comes back through
-      // this listener it will be a no-op (same data). Safe, idempotent.
+      // ── REALTIME LISTENERS for cross-device sync ─────────────────────────
+      let unsubActiveSubj = null;
+      let unsubSubjectDs  = null;
+
       unsubSubjects = onValue(
         ref(db, 'users/rahul/subjects'),
         (snap) => {
@@ -1747,16 +1732,40 @@ export default function App() {
             const sd = val[subj.id] || {};
             const completedArr = sd.completed    || [];
             const ldObj        = sd.lectureDates || {};
-            // Sync localStorage so it stays fresh on this device too
             ss(K.completed(subj.id),    completedArr);
             ss(K.lectureDates(subj.id), ldObj);
             updated[subj.id] = { completedIds: new Set(completedArr), lectureDates: ldObj };
           }
-          // Replace the entire map — this triggers Effect A → pushLiveStats
-          // so LiveView also stays current when a second device toggles.
           setAllSubjectsData(updated);
         },
         (err) => console.error('subjects listener error:', err)
+      );
+
+      // Keep activeSubject synchronized across all devices in real-time
+      unsubActiveSubj = onValue(
+        ref(db, 'users/rahul/global/settings/activeSubject'),
+        (snap) => {
+          const val = snap.val();
+          if (val && SUBJECTS[val] && val !== activeSubjectIdRef.current) {
+            localStorage.setItem(K.ACTIVE_SUBJECT, val);
+            setActiveSubjectId(val);
+          }
+        },
+        (err) => console.error('activeSubject listener error:', err)
+      );
+
+      // Keep subjectDailyStudy synchronized across all devices in real-time
+      unsubSubjectDs = onValue(
+        ref(db, 'users/rahul/global/subjectDailyStudy'),
+        (snap) => {
+          const val = snap.val();
+          if (val) {
+            ss(K.SUBJECT_DAILY_STUDY, val);
+            subjectDailyStudyRef.current = val;
+            setSubjectDailyStudy(val);
+          }
+        },
+        (err) => console.error('subjectDailyStudy listener error:', err)
       );
 
     }).catch(err => {
@@ -1853,25 +1862,14 @@ export default function App() {
       ? Math.max(storedToday, Math.floor((Date.now() - timerPayload.sessionStartTs) / 1000))
       : storedToday;
 
-    // ── Live subject credit ──────────────────────────────────────────────
-    // subjectDailyStudy is only written on subject switch / page hide.
-    // So while studying a subject, its recorded time is always stale (0 or
-    // last-credited value). Fix: compute the LIVE contribution of the active
-    // subject as (currentTotal - subjectSwitchBase) and add it to the push.
-    // Also send subjectSwitchBase so LiveView can re-extrapolate between pushes.
-    const activeId     = activeSubjectIdRef.current;
-    const switchBase   = subjectSwitchBaseRef.current ?? storedToday;
-    // Always compute liveExtra regardless of running/paused state.
-    // When running: this is the real-time live credit (timer is ticking).
-    // When paused:  this is the "pending gap" — time accumulated since the last
-    //               credited event (subject switch / pagehide). Without this,
-    //               pausing the timer makes the subject focus time snap back to
-    //               the stale persisted value instead of the true total.
-    const liveExtra    = Math.max(0, trueToday - switchBase);
-    if (liveExtra > 0 && activeId && subjects[activeId]) {
+    // Direct per-subject time attribution:
+    // If timer is running and trueToday is slightly ahead of storedToday, add the gap to activeId
+    const activeId = activeSubjectIdRef.current;
+    const deltaGap = Math.max(0, trueToday - storedToday);
+    if (deltaGap > 0 && activeId && subjects[activeId]) {
       subjects[activeId] = {
         ...subjects[activeId],
-        todayStudySecs: (subjects[activeId].todayStudySecs || 0) + liveExtra,
+        todayStudySecs: (subjects[activeId].todayStudySecs || 0) + deltaGap,
       };
     }
 
@@ -1881,9 +1879,6 @@ export default function App() {
       activeSubject:       activeId,
       streak:              streakRef.current,
       subjects,
-      // subjectSwitchBase is sent so LiveView can extrapolate active-subject
-      // time between 30-second pushes (same technique as total-time extrapolation)
-      subjectSwitchBase:   switchBase,
       updatedAt:           new Date().toISOString(),
     }).catch(err => console.error('liveStats push failed:', err));
 
@@ -1912,61 +1907,45 @@ export default function App() {
   }, [timerRunning, firebaseLoaded, pushLiveStats]);
 
 
-  // ── Timer tick — global time only; subject credit happens on switch/unload ─
+  // ── Timer tick — global time AND active subject time credited in lockstep ─
   const handleTimerTick = useCallback((delta = 1) => {
     if (dailyStudyRef.current == null) return;
     const today = todayISO();
+    const activeId = activeSubjectIdRef.current;
 
     // Global daily study
     const nextDs = { ...dailyStudyRef.current, [today]: (dailyStudyRef.current[today] ?? 0) + delta };
     dailyStudyRef.current = nextDs;
     ss(K.DAILY_STUDY, nextDs);
+
+    // Subject daily study (credited directly per tick to the currently active subject)
+    const currentSDs = subjectDailyStudyRef.current || {};
+    const todaySubj = { ...(currentSDs[today] || {}) };
+    todaySubj[activeId] = (todaySubj[activeId] || 0) + delta;
+    const nextSDs = { ...currentSDs, [today]: todaySubj };
+    subjectDailyStudyRef.current = nextSDs;
+    ss(K.SUBJECT_DAILY_STUDY, nextSDs);
+
     // Throttle Firebase write to every 10 s
     if (nextDs[today] % 10 === 0) {
       set(ref(db, 'users/rahul/global/dailyStudy'), nextDs).catch(console.error);
+      set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
     }
     setDailyStudy(nextDs);
-    // NOTE: per-subject credit is NOT done here.
-    // It is done exclusively in creditSubjectTime(), which is called:
-    //   - on switchSubject (credits the outgoing subject)
-    //   - on pagehide/beforeunload (credits the active subject)
-    // This prevents the double-counting that occurred when both the tick
-    // and the switch both added time for the same interval.
-  }, []);
-
-  // ── Credit elapsed time to a specific subject ─────────────────
-  // Called on subject switch and on page unload.
-  // `fromSecs` is the global daily total at the moment the subject session started.
-  // `toSecs`   is the global daily total right now.
-  const creditSubjectTime = useCallback((subjectId, fromSecs, toSecs) => {
-    const delta = toSecs - fromSecs;
-    if (delta <= 0) return;
-    const today   = todayISO();
-    const nextSDs = { ...subjectDailyStudyRef.current };
-    if (!nextSDs[today]) nextSDs[today] = {};
-    nextSDs[today][subjectId] = (nextSDs[today][subjectId] ?? 0) + delta;
-    subjectDailyStudyRef.current = nextSDs;
-    ss(K.SUBJECT_DAILY_STUDY, nextSDs);
-    set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
     setSubjectDailyStudy(nextSDs);
   }, []);
-  const creditSubjectTimeRef = useRef(creditSubjectTime);
-  useEffect(() => { creditSubjectTimeRef.current = creditSubjectTime; }, [creditSubjectTime]);
 
-  // ── Credit active subject when tab closes / hides ─────────────
-  // Without this, closing the tab without switching subjects would mean
-  // the time for the last (only) subject session is never credited.
+  // ── Flush study time when tab closes / hides ─────────────
   useEffect(() => {
     const handleHide = () => {
-      const today    = todayISO();
-      const totalNow = dailyStudyRef.current?.[today] ?? 0;
-      const base     = subjectSwitchBaseRef.current ?? totalNow;
-      // Use the in-memory ref — always accurate. Never fall back to
-      // localStorage key since it may be stale or missing on first load.
-      const activeId = activeSubjectIdRef.current;
-      creditSubjectTimeRef.current(activeId, base, totalNow);
-      // Update base so if the tab restores (not fully closed), we don't double-credit
-      subjectSwitchBaseRef.current = totalNow;
+      if (dailyStudyRef.current) {
+        ss(K.DAILY_STUDY, dailyStudyRef.current);
+        set(ref(db, 'users/rahul/global/dailyStudy'), dailyStudyRef.current).catch(console.error);
+      }
+      if (subjectDailyStudyRef.current) {
+        ss(K.SUBJECT_DAILY_STUDY, subjectDailyStudyRef.current);
+        set(ref(db, 'users/rahul/global/subjectDailyStudy'), subjectDailyStudyRef.current).catch(console.error);
+      }
     };
     window.addEventListener('pagehide', handleHide);
     return () => window.removeEventListener('pagehide', handleHide);
@@ -2020,9 +1999,6 @@ export default function App() {
     set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
     setSubjectDailyStudy(nextSDs);
 
-    // Reset switch base so next subject credit starts from the new total
-    subjectSwitchBaseRef.current = clamped;
-
     // Push liveStats right away so LiveView reflects the new time
     pushLiveStatsRef.current?.();
   }, []);
@@ -2043,8 +2019,6 @@ export default function App() {
     ss(K.SUBJECT_DAILY_STUDY, nextSDs);
     set(ref(db, 'users/rahul/global/subjectDailyStudy'), nextSDs).catch(console.error);
     setSubjectDailyStudy(nextSDs);
-    // Reset the switch base so next switch computes delta from 0
-    subjectSwitchBaseRef.current = 0;
     // Push liveStats immediately so LiveView reflects the reset at once
     // (without this, LiveView shows stale data until the next 30s heartbeat)
     pushLiveStatsRef.current?.();
@@ -2069,15 +2043,14 @@ export default function App() {
 
   const switchSubject = useCallback((newId) => {
     if (newId === activeSubjectId) return;
-    const today    = todayISO();
-    const totalNow = dailyStudyRef.current[today] ?? 0;
-    const base     = subjectSwitchBaseRef.current ?? totalNow;
+    // Flush current dailyStudy and subjectDailyStudy to Firebase immediately
+    if (dailyStudyRef.current) {
+      set(ref(db, 'users/rahul/global/dailyStudy'), dailyStudyRef.current).catch(console.error);
+    }
+    if (subjectDailyStudyRef.current) {
+      set(ref(db, 'users/rahul/global/subjectDailyStudy'), subjectDailyStudyRef.current).catch(console.error);
+    }
 
-    // Credit time studied since the last switch (or since load) to the outgoing subject
-    creditSubjectTimeRef.current(activeSubjectId, base, totalNow);
-
-    // New base = current total, for the incoming subject's session
-    subjectSwitchBaseRef.current = totalNow;
     localStorage.setItem(K.ACTIVE_SUBJECT, newId);
     // Write to Firebase so every other device (mobile, LiveView) opens with this subject
     set(ref(db, 'users/rahul/global/settings/activeSubject'), newId).catch(console.error);
