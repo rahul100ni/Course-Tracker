@@ -389,6 +389,71 @@ function Stopwatch({ onTick, onAdjust, onReset, firebaseInitialElapsed, firebase
     };
   }, []);
 
+  // ── Cross-device timer sync via Firebase realtime listener ──────────────
+  // THE core fix for "stop on mobile → PC/LiveView keeps running".
+  //
+  // The problem: the timer state (sessionStartTs) is written to Firebase by
+  // whichever device presses Play/Pause, but OTHER devices had no listener
+  // on that path — they only read it once at load. So stopping on mobile was
+  // invisible to PC, which kept its interval running and kept pushing
+  // timerRunning:true to liveStats indefinitely.
+  //
+  // The fix: subscribe all devices to onValue(timer). When sessionStartTs
+  // transitions null→value (start) or value→null (stop), every device reacts.
+  //
+  // Guard against own-write echoes (no infinite loop):
+  //   When WE write the stop, we set runningRef.current = false BEFORE the
+  //   Firebase write. So when our own echo comes back, the check
+  //   `runningRef.current && !firebaseRunning` is FALSE → no re-trigger.
+  //
+  // `firstFire = true` skips the immediate snapshot-on-subscribe, which the
+  // one-time sync effect already handled.
+  useEffect(() => {
+    if (firebaseInitialElapsed === null) return; // wait for initial load
+
+    let firstFire = true;
+    const unsub = onValue(
+      ref(db, 'users/rahul/global/timer'),
+      (snap) => {
+        if (firstFire) { firstFire = false; return; } // skip own initial snapshot
+
+        const data = snap.val();
+        if (!data) return;
+        const firebaseRunning = !!data.sessionStartTs;
+
+        if (runningRef.current && !firebaseRunning) {
+          // ── Remote STOP ────────────────────────────────────────────────
+          // Another device stopped the timer. Halt this device immediately.
+          // Use Math.max so we never go backwards: take the best known elapsed.
+          const fbElapsed    = data.sessionElapsed ?? elapsedRef.current;
+          const finalElapsed = Math.max(elapsedRef.current, fbElapsed);
+          isOwnerRef.current  = false;    // immediately halt the tick-writing interval
+          runningRef.current  = false;    // guard: prevents this branch re-triggering on cleanup echo
+          elapsedRef.current  = finalElapsed;
+          setElapsed(finalElapsed);
+          observerModeRef.current = false;
+          setRunning(false);              // triggers interval cleanup → writes final stopped state
+          onRunningChange?.(false);       // App: setTimerRunning(false) → pushLiveStats with timerRunning:false
+
+        } else if (!runningRef.current && firebaseRunning && !observerModeRef.current) {
+          // ── Remote START ───────────────────────────────────────────────
+          // Another device started a new session while we were paused.
+          // Enter display-only observer mode (no ownership, no Firebase writes).
+          const trueElapsed = Math.max(0, Math.floor((Date.now() - data.sessionStartTs) / 1000));
+          startTsRef.current      = data.sessionStartTs;
+          elapsedRef.current      = trueElapsed;
+          setElapsed(trueElapsed);
+          observerModeRef.current = true;
+          runningRef.current      = true;
+          setRunning(true);
+          // Do NOT call onRunningChange — observer mode must not trigger
+          // App's handleTimerTick, creditSubjectTime, or 30s push interval.
+        }
+      }
+    );
+    return () => unsub();
+  }, [firebaseInitialElapsed, onRunningChange]);
+
   // ── Interval managed by useEffect ────────────────────────────
   useEffect(() => {
     if (!running) return;
