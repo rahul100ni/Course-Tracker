@@ -1571,9 +1571,12 @@ export default function App() {
     const globalRef  = ref(db, 'users/rahul/global');
     const oldStatsRef = ref(db, 'users/rahul/stats');
 
-    // We'll set up a live subjects listener AFTER the initial load.
-    // Keep a ref to tear it down on unmount.
-    let unsubSubjects = null;
+    // Keep refs to tear down realtime listeners on unmount
+    let unsubSubjects   = null;
+    let unsubActiveSubj = null;
+    let unsubSubjectDs  = null;
+    let unsubFocusGoal  = null;
+    let unsubDailyStudy = null;
 
     get(globalRef).then(async (globalSnap) => {
       // ── ONE-TIME MIGRATION from v4 (stats/) to v5 (global/ + subjects/) ──
@@ -1639,7 +1642,7 @@ export default function App() {
       // ── NORMAL LOAD (already migrated) ──
       const [allSubjSnap, settingsSnap] = await Promise.all([
         get(ref(db, 'users/rahul/subjects')),
-        get(ref(db, 'users/rahul/global/settings')), // full settings node (subjects + activeSubject)
+        get(ref(db, 'users/rahul/global/settings')), // full settings node (subjects + activeSubject + focusGoalMins)
       ]);
 
       // Load global timer + daily study
@@ -1694,6 +1697,12 @@ export default function App() {
       setSubjectDailyStudy(savedSubjDs);
       setSubjectSettings(savedSettings);
 
+      // Sync focusGoalMins if stored in Firebase
+      if (settingsVal.focusGoalMins !== undefined) {
+        setFocusGoalMins(settingsVal.focusGoalMins);
+        ss(K.FOCUS_GOAL, settingsVal.focusGoalMins);
+      }
+
       // ── Active subject sync ──────────────────────────────────────────────
       // Firebase is the authoritative source for which subject is active.
       // It is written by switchSubject() on every device. This ensures that
@@ -1720,9 +1729,6 @@ export default function App() {
       setFirebaseLoaded(true);
 
       // ── REALTIME LISTENERS for cross-device sync ─────────────────────────
-      let unsubActiveSubj = null;
-      let unsubSubjectDs  = null;
-
       unsubSubjects = onValue(
         ref(db, 'users/rahul/subjects'),
         (snap) => {
@@ -1768,6 +1774,33 @@ export default function App() {
         (err) => console.error('subjectDailyStudy listener error:', err)
       );
 
+      // Keep focusGoalMins synchronized across all devices in real-time
+      unsubFocusGoal = onValue(
+        ref(db, 'users/rahul/global/settings/focusGoalMins'),
+        (snap) => {
+          const val = snap.val();
+          if (val !== null && val !== undefined) {
+            ss(K.FOCUS_GOAL, val);
+            setFocusGoalMins(val);
+          }
+        },
+        (err) => console.error('focusGoalMins listener error:', err)
+      );
+
+      // Keep global dailyStudy synchronized across all devices in real-time
+      unsubDailyStudy = onValue(
+        ref(db, 'users/rahul/global/dailyStudy'),
+        (snap) => {
+          const val = snap.val();
+          if (val) {
+            ss(K.DAILY_STUDY, val);
+            dailyStudyRef.current = val;
+            setDailyStudy(val);
+          }
+        },
+        (err) => console.error('dailyStudy listener error:', err)
+      );
+
     }).catch(err => {
       console.error('Firebase load failed, using localStorage:', err);
       const newAllSubj = {};
@@ -1785,7 +1818,11 @@ export default function App() {
     });
 
     return () => {
-      if (unsubSubjects) unsubSubjects();
+      if (unsubSubjects)   unsubSubjects();
+      if (unsubActiveSubj) unsubActiveSubj();
+      if (unsubSubjectDs)  unsubSubjectDs();
+      if (unsubFocusGoal)  unsubFocusGoal();
+      if (unsubDailyStudy) unsubDailyStudy();
     };
   }, []);
 
